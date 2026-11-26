@@ -7,7 +7,6 @@ from io import StringIO
 st.set_page_config(page_title="Hockey Pro AI", page_icon="🏒", layout="wide")
 st.title("🏒 Анализатор матчей (7 лиг • 4 000 000 симуляций)")
 
-# --- НАСТРОЙКИ ЛИГ (СРЕДНЯЯ РЕЗУЛЬТАТИВНОСТЬ И БОНУС ЛЬДА) ---
 LEAGUES_CONFIG = {
     "🇺🇸🇨🇦 НХЛ (Авто-API + полные составы)": {"code": "NHL", "avg": 3.05, "home_boost": 1.04},
     "🇷🇺 КХЛ (KHL)": {"code": "KHL", "avg": 2.65, "home_boost": 1.05},
@@ -18,7 +17,6 @@ LEAGUES_CONFIG = {
     "🇳🇴 Норвегия (EHL)": {"code": "EHL", "avg": 3.10, "home_boost": 1.06},
 }
 
-# --- ПРЕДУСТАНОВЛЕННЫЕ БАЗЫ КОМАНД СЕЗОНА 2026/27 ---
 PRESET_TEAMS = {
     "KHL": [
         "Металлург Мг", "ЦСКА", "Локомотив", "Авангард", "Северсталь", "Торпедо",
@@ -52,7 +50,6 @@ PRESET_TEAMS = {
     ]
 }
 
-# --- 1. ЗАГРУЗКА ДАННЫХ НХЛ ---
 @st.cache_data(ttl=3600)
 def get_nhl_teams():
     d = ".".join(["api-web", "nhle", "com"])
@@ -106,28 +103,22 @@ def get_nhl_roster(abbrev):
         })
     return pd.DataFrame(skaters), pd.DataFrame(goalies)
 
-# --- 2. МАТЕМАТИЧЕСКИЙ АНСАМБЛЬ (4 МОДЕЛИ x 1 000 000) ---
 def run_simulations(l1, l2, n=1_000_000):
     rng = np.random.default_rng()
-    
-    # 1. Двумерный Пуассон
     cov = 0.14
     z = rng.poisson(cov, n)
     x_bp = rng.poisson(max(0.1, l1 - cov), n) + z
     y_bp = rng.poisson(max(0.1, l2 - cov), n) + z
     
-    # 2. Диксон-Коулз
     x_dc = rng.poisson(l1, n)
     y_dc = rng.poisson(l2, n)
     mask_low = (x_dc <= 1) & (y_dc <= 1) & (rng.random(n) < 0.08)
     x_dc[mask_low] = np.where(x_dc[mask_low] == y_dc[mask_low], x_dc[mask_low], x_dc[mask_low] + 1)
     
-    # 3. Отрицательное биномиальное
     r = 6.5
     x_nb = rng.negative_binomial(r, r / (r + l1), n)
     y_nb = rng.negative_binomial(r, r / (r + l2), n)
     
-    # 4. Марковская цепь + Empty Net
     x_en = rng.poisson(l1 * 0.93, n)
     y_en = rng.poisson(l2 * 0.93, n)
     diff = x_en - y_en
@@ -139,7 +130,6 @@ def run_simulations(l1, l2, n=1_000_000):
     
     return np.concatenate([x_bp, x_dc, x_nb, x_en]), np.concatenate([y_bp, y_dc, y_nb, y_en])
 
-# --- 3. ИНТЕРФЕЙС ВЫБОРА ЛИГИ ---
 selected_league = st.selectbox("Выберите лигу", list(LEAGUES_CONFIG.keys()))
 cfg = LEAGUES_CONFIG[selected_league]
 l_code = cfg["code"]
@@ -174,7 +164,6 @@ if l_code == "NHL":
         base_l1, base_l2 = 2.8, 2.5
         t1_name, t2_name = "Хозяева", "Гости"
 else:
-    # Режим КХЛ / Финляндия / Швеция / Чехия / Швейцария / Норвегия
     team_list = PRESET_TEAMS[l_code]
     col_t1, col_t2 = st.columns(2)
     with col_t1:
@@ -197,17 +186,16 @@ else:
     base_l1 = t1_att * t2_def * avg * cfg["home_boost"]
     base_l2 = t2_att * t1_def * avg * (2 - cfg["home_boost"])
 
-# --- БЛОК ТОНКОЙ КОРРЕКТИРОВКИ (ТРАВМЫ, ВРАТАРИ, xG) ---
 with st.expander("⚙️ Поправки на составы, травмы, вратарей и xG"):
     c_adj1, c_adj2 = st.columns(2)
     with c_adj1:
-        adj1 = st.slider(f"Коррекция силы {t1_name} (%)", -25, 25, 0, help="Учтите травмы лидеров или бекап-вратаря")
+        adj1 = st.slider(f"Коррекция силы {t1_name} (%)", -25, 25, 0)
     with c_adj2:
         adj2 = st.slider(f"Коррекция силы {t2_name} (%)", -25, 25, 0)
         
     if l_code != "NHL":
         st.caption("📋 Вставьте скопированную с сайта лиги таблицу игроков (необязательно):")
-        raw_p1 = st.text_area(f"Статистика игроков {t1_name} (скопируйте таблицу с сайта и вставьте сюда)", height=80)
+        raw_p1 = st.text_area(f"Статистика игроков {t1_name}", height=80)
         raw_p2 = st.text_area(f"Статистика игроков {t2_name}", height=80)
         if raw_p1.strip():
             try:
@@ -225,7 +213,6 @@ lambda2 = round(max(0.4, base_l2 * (1 + adj2 / 100)), 2)
 
 st.info(f"Итоговый расчетный xG (λ): **{t1_name}: {lambda1}** — **{t2_name}: {lambda2}**")
 
-# --- ЗАПУСК СИМУЛЯЦИЙ ---
 if st.button("🚀 Запустить 4 000 000 симуляций", use_container_width=True):
     g1, g2 = run_simulations(lambda1, lambda2)
     tot = g1 + g2
@@ -244,16 +231,16 @@ if st.button("🚀 Запустить 4 000 000 симуляций", use_contain
             ("ТБ 5.5", np.mean(tot > 5.5)),
             ("ТМ 5.5", np.mean(tot < 5.5)),
             ("ТБ 6.5", np.mean(tot > 6.5)),
-("ТМ 6.5", np.mean(tot < 6.5)),
-("Ф1 (-1.5)", np.mean((g1 - g2) > 1.5)),
-("Ф1 (+1.5)", np.mean((g1 - g2) > -1.5)),
-("Ф2 (-1.5)", np.mean((g2 - g1) > 1.5)),
-("Ф2 (+1.5)", np.mean((g2 - g1) > -1.5)),
-("П1 + ТБ 4.5", np.mean((g1 > g2) & (tot > 4.5))),
-("П1 + ТМ 5.5", np.mean((g1 > g2) & (tot < 5.5))),
-("П2 + ТБ 4.5", np.mean((g1 < g2) & (tot > 4.5))),
-("П2 + ТМ 5.5", np.mean((g1 < g2) & (tot < 5.5))),
-("1Х + ТБ 4.5", np.mean((g1 >= g2) & (tot > 4.5))),
+            ("ТМ 6.5", np.mean(tot < 6.5)),
+            ("Ф1 (-1.5)", np.mean((g1 - g2) > 1.5)),
+            ("Ф1 (+1.5)", np.mean((g1 - g2) > -1.5)),
+            ("Ф2 (-1.5)", np.mean((g2 - g1) > 1.5)),
+            ("Ф2 (+1.5)", np.mean((g2 - g1) > -1.5)),
+            ("П1 + ТБ 4.5", np.mean((g1 > g2) & (tot > 4.5))),
+            ("П1 + ТМ 5.5", np.mean((g1 > g2) & (tot < 5.5))),
+            ("П2 + ТБ 4.5", np.mean((g1 < g2) & (tot > 4.5))),
+            ("П2 + ТМ 5.5", np.mean((g1 < g2) & (tot < 5.5))),
+            ("1Х + ТБ 4.5", np.mean((g1 >= g2) & (tot > 4.5))),
 ("1Х + ТМ 5.5", np.mean((g1 >= g2) & (tot < 5.5))),
 ("2Х + ТБ 4.5", np.mean((g1 <= g2) & (tot > 4.5))),
 ("2Х + ТМ 5.5", np.mean((g1 <= g2) & (tot < 5.5))),
@@ -267,9 +254,9 @@ vals, counts = np.unique(packed, return_counts=True)
 top_idx = np.argsort(-counts)[:5]
 top_list = []
 for idx in top_idx:
-    sc1, sc2 = divmod(vals[idx], 100)
-    prob = (counts[idx] / len(g1)) * 100
-    top_list.append({"Точный счет": f"{sc1}:{sc2}", "Вероятность (%)": round(prob, 2)})
+sc1, sc2 = divmod(vals[idx], 100)
+prob = (counts[idx] / len(g1)) * 100
+top_list.append({"Точный счет": f"{sc1}:{sc2}", "Вероятность (%)": round(prob, 2)})
 st.dataframe(pd.DataFrame(top_list), use_container_width=True, hide_index=True)
 with tab2:
 if not gl1.empty:
@@ -279,7 +266,7 @@ if not sk1.empty:
 st.subheader("Полевые игроки (весь сезон)")
 st.dataframe(sk1, use_container_width=True, hide_index=True)
 else:
-st.info("Для европейских лиг вставьте таблицу игроков с сайта лиги в меню «Поправки на составы» выше, чтобы просмотреть ее целиком здесь.")
+st.info("Вставьте таблицу игроков с сайта лиги в меню выше, чтобы увидеть ее целиком.")
 with tab3:
 if not gl2.empty:
 st.subheader("Вратари")
@@ -288,4 +275,4 @@ if not sk2.empty:
 st.subheader("Полевые игроки (весь сезон)")
 st.dataframe(sk2, use_container_width=True, hide_index=True)
 else:
-st.info("Для европейских лиг вставьте таблицу игроков с сайта лиги в меню «Поправки на составы» выше, чтобы просмотреть ее целиком здесь.")
+st.info("Вставьте таблицу игроков с сайта лиги в меню выше, чтобы увидеть ее целиком.")
