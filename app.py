@@ -1,4 +1,3 @@
-
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -8,13 +7,9 @@ st.set_page_config(page_title="Hockey Pro AI", page_icon="🏒", layout="wide")
 st.title("🏒 Анализатор матчей (4 000 000 симуляций)")
 
 @st.cache_data(ttl=3600)
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-BASE_API = "https://nhle.com" + "/v1"
-
-@st.cache_data(ttl=3600)
 def get_nhl_teams():
-    url = BASE_API + "/standings/now"
-    res = requests.get(url, headers=HEADERS, timeout=10).json()
+    u = "https://api-web." + "://nhle.com" + "standings/now"
+    res = requests.get(u, timeout=10).json()
     teams = {}
     for t in res["standings"]:
         abbrev = t["teamAbbrev"]["default"]
@@ -35,34 +30,8 @@ def get_nhl_teams():
 
 @st.cache_data(ttl=3600)
 def get_roster_stats(abbrev):
-    url = f"{BASE_API}/club-stats/{abbrev}/now"
-    res = requests.get(url, headers=HEADERS, timeout=10).json()
-    skaters = []
-    for s in res.get("skaters", []):
-        skaters.append({
-            "Игрок": f"{s['firstName']['default']} {s['lastName']['default']}",
-            "Поз.": s["positionCode"],
-            "Игры": s["gamesPlayed"],
-            "Голы": s["goals"],
-            "Пасы": s["assists"],
-            "Очки": s["points"],
-            "+/-": s["plusMinus"],
-            "Броски": s["shots"],
-            "Штр": s["penaltyMinutes"]
-        })
-    goalies = []
-    for g in res.get("goalies", []):
-        goalies.append({
-            "Вратарь": f"{g['firstName']['default']} {g['lastName']['default']}",
-            "Игры": g["gamesPlayed"],
-            "Победы": g["wins"],
-            "% ОБ": round(g["savePercentage"] * 100, 2),
-            "КН (GAA)": round(g["goalsAgainstAverage"], 2),
-            "Сухари": g["shutouts"]
-        })
-    return pd.DataFrame(skaters), pd.DataFrame(goalies)
-    url = f"https://nhle.com{abbrev}/now"
-    res = requests.get(url).json()
+    u = "https://api-web." + f"://nhle.comclub-stats/{abbrev}/now"
+    res = requests.get(u, timeout=10).json()
     skaters = []
     for s in res.get("skaters", []):
         skaters.append({
@@ -97,13 +66,13 @@ def run_simulations(l1, l2, n=1_000_000):
     x_bp = rng.poisson(max(0.1, l1 - cov), n) + z
     y_bp = rng.poisson(max(0.1, l2 - cov), n) + z
     
-    # 2. Диксон-Коулз (поправка на ничьи/низы)
+    # 2. Диксон-Коулз
     x_dc = rng.poisson(l1, n)
     y_dc = rng.poisson(l2, n)
     mask_low = (x_dc <= 1) & (y_dc <= 1) & (rng.random(n) < 0.08)
     x_dc[mask_low] = np.where(x_dc[mask_low] == y_dc[mask_low], x_dc[mask_low], x_dc[mask_low] + 1)
     
-    # 3. Отрицательное биномиальное (дисперсия)
+    # 3. Отрицательное биномиальное
     r = 6.5
     x_nb = rng.negative_binomial(r, r / (r + l1), n)
     y_nb = rng.negative_binomial(r, r / (r + l2), n)
