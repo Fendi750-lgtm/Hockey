@@ -6,6 +6,14 @@ import streamlit as st
 st.set_page_config(page_title="Hockey Pro AI", page_icon="🏒", layout="wide")
 st.title("🏒 Анализатор матчей (7 лиг • 4 000 000 симуляций)")
 
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+}
+
 LEAGUES = {
     "🇺🇸🇨🇦 НХЛ (Авто-API + составы)": {
         "c": "NHL",
@@ -21,6 +29,40 @@ LEAGUES = {
 }
 
 TEAMS = {
+    "NHL": [
+        "ANA",
+        "BOS",
+        "BUF",
+        "CGY",
+        "CAR",
+        "CHI",
+        "COL",
+        "CBJ",
+        "DAL",
+        "DET",
+        "EDM",
+        "FLA",
+        "LAK",
+        "MIN",
+        "MTL",
+        "NSH",
+        "NJD",
+        "NYI",
+        "NYR",
+        "OTT",
+        "PHI",
+        "PIT",
+        "SJS",
+        "SEA",
+        "STL",
+        "TBL",
+        "TOR",
+        "UTA",
+        "VAN",
+        "VGK",
+        "WSH",
+        "WPG",
+    ],
     "KHL": [
         "Металлург Мг",
         "ЦСКА",
@@ -129,9 +171,13 @@ TEAMS = {
 @st.cache_data(ttl=3600)
 def get_nhl_teams():
     try:
-        r = requests.get(
-            "https://nhle.com", timeout=10
-        ).json()
+        res = requests.get(
+            "https://nhle.com",
+            headers=HEADERS,
+            timeout=10,
+        )
+        res.raise_for_status()
+        r = res.json()
         return {
             f"{t['teamName']['default']} ({t['teamAbbrev']['default']})": {
                 "a": t["teamAbbrev"]["default"],
@@ -144,17 +190,20 @@ def get_nhl_teams():
             }
             for t in r.get("standings", [])
         }
-    except Exception as e:
-        st.error(f"Ошибка API: {e}")
+    except Exception:
         return {}
 
 
 @st.cache_data(ttl=3600)
 def get_nhl_roster(a):
     try:
-        r = requests.get(
-            f"https://nhle.com{a}/now", timeout=10
-        ).json()
+        res = requests.get(
+            f"https://nhle.com{a}/now",
+            headers=HEADERS,
+            timeout=10,
+        )
+        res.raise_for_status()
+        r = res.json()
         sk = [
             {
                 "Игрок": f"{s['firstName']['default']} {s['lastName']['default']}",
@@ -209,14 +258,12 @@ def run_sim(l1, l2, n=1_000_000):
 lg_name = st.selectbox("Лига:", list(LEAGUES.keys()))
 lg = LEAGUES[lg_name]
 c1, c2 = st.columns(2)
+nhl = get_nhl_teams() if lg["c"] == "NHL" else {}
 
-if lg["c"] == "NHL":
-    nhl = get_nhl_teams()
+if lg["c"] == "NHL" and nhl:
     names = sorted(nhl.keys())
-    if not names:
-        st.stop()
     h_t = c1.selectbox("🏠 Хозяева", names, 0)
-    a_t = c2.selectbox("✈️ Гости", names, min(1, len(names) - 1))
+    a_t = c2.selectbox("✈️ Гости", names, 1)
     hs, as_ = nhl[h_t], nhl[a_t]
     avg = lg["avg"]
     dl1 = round(
@@ -233,6 +280,8 @@ if lg["c"] == "NHL":
         2,
     )
 else:
+    if lg["c"] == "NHL":
+        st.warning("API НХЛ временно недоступен с сервера — включен ручной режим.")
     tl = TEAMS[lg["c"]]
     h_t = c1.selectbox("🏠 Хозяева", tl, 0)
     a_t = c2.selectbox("✈️ Гости", tl, 1)
@@ -267,7 +316,7 @@ if st.button("🚀 Запустить 4 000 000 симуляций", type="prima
         st.subheader("🔢 Топ-5 точных счетов")
         st.dataframe(
             pd.DataFrame({
-                "Счет": [f"{sc[i][0]} : {sc[i][1]}" for i in idx],
+                "Счет": [f"{sc[i]} : {sc[i]}" for i in idx],
                 "Вероятность (%)": [round(cnt[i] / len(x) * 100, 2) for i in idx],
             }),
             hide_index=True,
@@ -279,6 +328,11 @@ if lg["c"] == "NHL":
         t1, t2 = st.tabs([h_t, a_t])
         for tab, tm in zip([t1, t2], [h_t, a_t]):
             with tab:
-                sk, gl = get_nhl_roster(nhl[tm]["a"])
-                st.dataframe(gl, hide_index=True, use_container_width=True)
-                st.dataframe(sk, hide_index=True, use_container_width=True)
+                abbr = nhl[tm]["a"] if nhl else tm
+                sk, gl = get_nhl_roster(abbr)
+                if not gl.empty:
+                    st.dataframe(gl, hide_index=True, use_container_width=True)
+                if not sk.empty:
+                    st.dataframe(sk, hide_index=True, use_container_width=True)
+                if gl.empty and sk.empty:
+                    st.info("Составы временно недоступны.")
