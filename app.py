@@ -130,6 +130,16 @@ def run_simulations(l1, l2, n=1_000_000):
     
     return np.concatenate([x_bp, x_dc, x_nb, x_en]), np.concatenate([y_bp, y_dc, y_nb, y_en])
 
+def show_roster_tab(gl_df, sk_df):
+    if not gl_df.empty:
+        st.subheader("Вратари")
+        st.dataframe(gl_df, use_container_width=True, hide_index=True)
+    if not sk_df.empty:
+        st.subheader("Полевые игроки (весь сезон)")
+        st.dataframe(sk_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Вставьте таблицу игроков с сайта лиги в меню выше, чтобы увидеть ее целиком.")
+
 selected_league = st.selectbox("Выберите лигу", list(LEAGUES_CONFIG.keys()))
 cfg = LEAGUES_CONFIG[selected_league]
 l_code = cfg["code"]
@@ -141,20 +151,15 @@ if l_code == "NHL":
         teams_data = get_nhl_teams()
         team_names = sorted(list(teams_data.keys()))
         col_t1, col_t2 = st.columns(2)
-        with col_t1:
-            t1_name = st.selectbox("Хозяева (П1)", team_names, index=0)
-        with col_t2:
-            t2_name = st.selectbox("Гости (П2)", team_names, index=1)
-            
+        t1_name = col_t1.selectbox("Хозяева (П1)", team_names, index=0)
+        t2_name = col_t2.selectbox("Гости (П2)", team_names, index=1)
         t1 = teams_data[t1_name]
         t2 = teams_data[t2_name]
-        
         avg = cfg["avg"]
         t1_att = (t1["home_gf"] / max(1, t1["home_gp"])) / avg
         t1_def = (t1["home_ga"] / max(1, t1["home_gp"])) / avg
         t2_att = (t2["road_gf"] / max(1, t2["road_gp"])) / avg
         t2_def = (t2["road_ga"] / max(1, t2["road_gp"])) / avg
-        
         base_l1 = t1_att * t2_def * avg * cfg["home_boost"]
         base_l2 = t2_att * t1_def * avg * (2 - cfg["home_boost"])
         sk1, gl1 = get_nhl_roster(t1["abbrev"])
@@ -166,33 +171,28 @@ if l_code == "NHL":
 else:
     team_list = PRESET_TEAMS[l_code]
     col_t1, col_t2 = st.columns(2)
-    with col_t1:
-        t1_name = st.selectbox("Хозяева (П1)", team_list, index=0)
-        gp1 = st.number_input(f"Игры дома ({t1_name})", 1, 80, 15)
-        gf1 = st.number_input(f"Забито дома ({t1_name})", 0, 300, 45)
-        ga1 = st.number_input(f"Пропущено дома ({t1_name})", 0, 300, 35)
-    with col_t2:
-        t2_name = st.selectbox("Гости (П2)", team_list, index=1)
-        gp2 = st.number_input(f"Игры в гостях ({t2_name})", 1, 80, 15)
-        gf2 = st.number_input(f"Забито в гостях ({t2_name})", 0, 300, 38)
-        ga2 = st.number_input(f"Пропущено в гостях ({t2_name})", 0, 300, 42)
-        
+    t1_name = col_t1.selectbox("Хозяева (П1)", team_list, index=0)
+    gp1 = col_t1.number_input(f"Игры дома ({t1_name})", 1, 80, 15)
+    gf1 = col_t1.number_input(f"Забито дома ({t1_name})", 0, 300, 45)
+    ga1 = col_t1.number_input(f"Пропущено дома ({t1_name})", 0, 300, 35)
+    
+    t2_name = col_t2.selectbox("Гости (П2)", team_list, index=1)
+    gp2 = col_t2.number_input(f"Игры в гостях ({t2_name})", 1, 80, 15)
+    gf2 = col_t2.number_input(f"Забито в гостях ({t2_name})", 0, 300, 38)
+    ga2 = col_t2.number_input(f"Пропущено в гостях ({t2_name})", 0, 300, 42)
+    
     avg = cfg["avg"]
     t1_att = (gf1 / gp1) / avg
     t1_def = (ga1 / gp1) / avg
     t2_att = (gf2 / gp2) / avg
     t2_def = (ga2 / gp2) / avg
-    
     base_l1 = t1_att * t2_def * avg * cfg["home_boost"]
     base_l2 = t2_att * t1_def * avg * (2 - cfg["home_boost"])
 
 with st.expander("⚙️ Поправки на составы, травмы, вратарей и xG"):
     c_adj1, c_adj2 = st.columns(2)
-    with c_adj1:
-        adj1 = st.slider(f"Коррекция силы {t1_name} (%)", -25, 25, 0)
-    with c_adj2:
-        adj2 = st.slider(f"Коррекция силы {t2_name} (%)", -25, 25, 0)
-        
+    adj1 = c_adj1.slider(f"Коррекция силы {t1_name} (%)", -25, 25, 0)
+    adj2 = c_adj2.slider(f"Коррекция силы {t2_name} (%)", -25, 25, 0)
     if l_code != "NHL":
         st.caption("📋 Вставьте скопированную с сайта лиги таблицу игроков (необязательно):")
         raw_p1 = st.text_area(f"Статистика игроков {t1_name}", height=80)
@@ -216,7 +216,6 @@ st.info(f"Итоговый расчетный xG (λ): **{t1_name}: {lambda1}** 
 if st.button("🚀 Запустить 4 000 000 симуляций", use_container_width=True):
     g1, g2 = run_simulations(lambda1, lambda2)
     tot = g1 + g2
-    
     tab1, tab2, tab3 = st.tabs(["📊 Исходы и Точный счет", f"📋 Состав {t1_name}", f"📋 Состав {t2_name}"])
     
     with tab1:
@@ -241,9 +240,9 @@ if st.button("🚀 Запустить 4 000 000 симуляций", use_contain
             ("П2 + ТБ 4.5", np.mean((g1 < g2) & (tot > 4.5))),
             ("П2 + ТМ 5.5", np.mean((g1 < g2) & (tot < 5.5))),
             ("1Х + ТБ 4.5", np.mean((g1 >= g2) & (tot > 4.5))),
-("1Х + ТМ 5.5", np.mean((g1 >= g2) & (tot < 5.5))),
-("2Х + ТБ 4.5", np.mean((g1 <= g2) & (tot > 4.5))),
-("2Х + ТМ 5.5", np.mean((g1 <= g2) & (tot < 5.5))),
+            ("1Х + ТМ 5.5", np.mean((g1 >= g2) & (tot < 5.5))),
+            ("2Х + ТБ 4.5", np.mean((g1 <= g2) & (tot > 4.5))),
+            ("2Х + ТМ 5.5", np.mean((g1 <= g2) & (tot < 5.5))),
 ]
 df_m = pd.DataFrame(markets, columns=["Маркет", "Вероятность"])
 df_m["Вероятность (%)"] = (df_m["Вероятность"] * 100).round(2)
@@ -253,23 +252,8 @@ packed = g1 * 100 + g2
 vals, counts = np.unique(packed, return_counts=True)
 top_idx = np.argsort(-counts)[:5]
 top_list = [{"Точный счет": f"{vals[i]//100}:{vals[i]%100}", "Вероятность (%)": round(counts[i] / len(g1) * 100, 2)} for i in top_idx]
-top_list.append({"Точный счет": f"{sc1}:{sc2}", "Вероятность (%)": round(prob, 2)})
 st.dataframe(pd.DataFrame(top_list), use_container_width=True, hide_index=True)
 with tab2:
-if not gl1.empty:
-st.subheader("Вратари")
-st.dataframe(gl1, use_container_width=True, hide_index=True)
-if not sk1.empty:
-st.subheader("Полевые игроки (весь сезон)")
-st.dataframe(sk1, use_container_width=True, hide_index=True)
-else:
-st.info("Вставьте таблицу игроков с сайта лиги в меню выше, чтобы увидеть ее целиком.")
+show_roster_tab(gl1, sk1)
 with tab3:
-if not gl2.empty:
-st.subheader("Вратари")
-st.dataframe(gl2, use_container_width=True, hide_index=True)
-if not sk2.empty:
-st.subheader("Полевые игроки (весь сезон)")
-st.dataframe(sk2, use_container_width=True, hide_index=True)
-else:
-st.info("Вставьте таблицу игроков с сайта лиги в меню выше, чтобы увидеть ее целиком.")
+show_roster_tab(gl2, sk2)
