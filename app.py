@@ -8,9 +8,13 @@ st.set_page_config(page_title="Hockey Pro AI", page_icon="🏒", layout="wide")
 st.title("🏒 Анализатор матчей (4 000 000 симуляций)")
 
 @st.cache_data(ttl=3600)
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+BASE_API = "https://nhle.com" + "/v1"
+
+@st.cache_data(ttl=3600)
 def get_nhl_teams():
-    url = "https://nhle.com"
-    res = requests.get(url).json()
+    url = BASE_API + "/standings/now"
+    res = requests.get(url, headers=HEADERS, timeout=10).json()
     teams = {}
     for t in res["standings"]:
         abbrev = t["teamAbbrev"]["default"]
@@ -31,6 +35,32 @@ def get_nhl_teams():
 
 @st.cache_data(ttl=3600)
 def get_roster_stats(abbrev):
+    url = f"{BASE_API}/club-stats/{abbrev}/now"
+    res = requests.get(url, headers=HEADERS, timeout=10).json()
+    skaters = []
+    for s in res.get("skaters", []):
+        skaters.append({
+            "Игрок": f"{s['firstName']['default']} {s['lastName']['default']}",
+            "Поз.": s["positionCode"],
+            "Игры": s["gamesPlayed"],
+            "Голы": s["goals"],
+            "Пасы": s["assists"],
+            "Очки": s["points"],
+            "+/-": s["plusMinus"],
+            "Броски": s["shots"],
+            "Штр": s["penaltyMinutes"]
+        })
+    goalies = []
+    for g in res.get("goalies", []):
+        goalies.append({
+            "Вратарь": f"{g['firstName']['default']} {g['lastName']['default']}",
+            "Игры": g["gamesPlayed"],
+            "Победы": g["wins"],
+            "% ОБ": round(g["savePercentage"] * 100, 2),
+            "КН (GAA)": round(g["goalsAgainstAverage"], 2),
+            "Сухари": g["shutouts"]
+        })
+    return pd.DataFrame(skaters), pd.DataFrame(goalies)
     url = f"https://nhle.com{abbrev}/now"
     res = requests.get(url).json()
     skaters = []
