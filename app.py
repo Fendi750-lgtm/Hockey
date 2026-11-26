@@ -286,3 +286,90 @@ if not sk.empty:
 st.dataframe(sk, hide_index=True, use_container_width=True)
 if gl.empty and sk.empty:
 st.info("Составы временно недоступны.")
+lg_name = st.selectbox("Лига:", list(LEAGUES.keys()))
+lg = LEAGUES[lg_name]
+c1, c2 = st.columns(2)
+
+nhl = get_nhl_teams() if lg["c"] == "NHL" else {}
+xg_data = get_nhl_xg() if lg["c"] == "NHL" else {}
+
+if lg["c"] == "NHL" and nhl:
+    names = sorted(nhl.keys())
+    h_t = c1.selectbox("🏠 Хозяева", names, 0)
+    a_t = c2.selectbox("✈️ Гости", names, 1)
+    hs, as_ = nhl[h_t], nhl[a_t]
+    h_abbr, a_abbr = hs["a"], as_["a"]
+    avg = lg["avg"]
+
+    if h_abbr in xg_data and a_abbr in xg_data:
+        l_xg = np.mean([v["xgf_pg"] for v in xg_data.values()]) or avg
+        dl1 = round(l_xg * (xg_data[h_abbr]["xgf_pg"] / l_xg) * (xg_data[a_abbr]["xga_pg"] / l_xg) * lg["hb"], 2)
+        dl2 = round(l_xg * (xg_data[a_abbr]["xgf_pg"] / l_xg) * (xg_data[h_abbr]["xga_pg"] / l_xg), 2)
+        st.caption(f"📊 Авто-xG (MoneyPuck): {h_abbr} ({xg_data[h_abbr]['xgf_pg']:.2f} xGF / {xg_data[h_abbr]['xga_pg']:.2f} xGA) vs {a_abbr} ({xg_data[a_abbr]['xgf_pg']:.2f} xGF / {xg_data[a_abbr]['xga_pg']:.2f} xGA)")
+    else:
+        dl1 = round(avg * ((hs["hgf"] / hs["hgp"]) / avg) * ((as_["rga"] / as_["rgp"]) / avg) * lg["hb"], 2)
+        dl2 = round(avg * ((as_["rgf"] / as_["rgp"]) / avg) * ((hs["hga"] / hs["hgp"]) / avg), 2)
+        st.caption("📊 Авто-xG рассчитан по средним забитым/пропущенным голам из API НХЛ.")
+else:
+    if lg["c"] == "NHL":
+        st.warning("API НХЛ временно недоступен — включен базовый расчет.")
+    tl = TEAMS[lg["c"]]
+    h_t = c1.selectbox("🏠 Хозяева", tl, 0)
+    a_t = c2.selectbox("✈️ Гости", tl, 1)
+    dl1, dl2 = round(lg["avg"] * lg["hb"], 2), round(lg["avg"], 2)
+
+with st.sidebar:
+    st.header("🧮 Калькулятор xG по броскам")
+    if st.checkbox("Пересчитать xG по броскам в створ (SOG)"):
+        sog1 = st.number_input(f"Броски в створ: {h_t}", 15.0, 45.0, 30.0, 0.5)
+        sh1 = st.number_input(f"Реализация {h_t} (%)", 4.0, 18.0, 9.5, 0.5)
+        sog2 = st.number_input(f"Броски в створ: {a_t}", 15.0, 45.0, 28.0, 0.5)
+        sh2 = st.number_input(f"Реализация {a_t} (%)", 4.0, 18.0, 9.0, 0.5)
+        dl1 = round((sog1 * (sh1 / 100.0)) * lg["hb"], 2)
+        dl2 = round(sog2 * (sh2 / 100.0), 2)
+
+k1, k2 = st.columns(2)
+l1 = k1.number_input(f"Ожидаемые голы (xG): {h_t}", 0.5, 8.0, float(dl1), 0.05)
+l2 = k2.number_input(f"Ожидаемые голы (xG): {a_t}", 0.5, 8.0, float(dl2), 0.05)
+
+if st.button("🚀 Запустить 4 000 000 симуляций", type="primary", use_container_width=True):
+    with st.spinner("Симуляция..."):
+        x, y = run_sim(l1, l2)
+        tot = x + y
+        p1, px, p2 = np.mean(x > y) * 100, np.mean(x == y) * 100, np.mean(x < y) * 100
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("П1 (Хозяева)", f"{p1:.2f}%", f"С ОТ: {p1 + px * 0.52:.2f}%")
+    m2.metric("Х (Ничья)", f"{px:.2f}%")
+    m3.metric("П2 (Гости)", f"{p2:.2f}%", f"С ОТ: {p2 + px * 0.48:.2f}%")
+
+    st.subheader("🎯 Тоталы (Основное время)")
+    tc = st.columns(4)
+    for i, ln in enumerate([4.5, 5.5, 6.5, 7.5]):
+        ov = np.mean(tot > ln) * 100
+        tc[i].info(f"**Т {ln}**\n\nТБ: **{ov:.1f}%**\n\nТМ: **{100 - ov:.1f}%**")
+
+    sc, cnt = np.unique(np.column_stack((x, y)), axis=0, return_counts=True)
+    idx = np.argsort(-cnt)[:5]
+    st.subheader("🔢 Топ-5 точных счетов")
+    st.dataframe(
+        pd.DataFrame({
+            "Счет": [f"{int(sc[i, 0])} : {int(sc[i, 1])}" for i in idx],
+            "Вероятность (%)": [round(cnt[i] / len(x) * 100, 2) for i in idx],
+        }),
+        hide_index=True,
+        use_container_width=True,
+    )
+
+if lg["c"] == "NHL":
+    with st.expander("📋 Составы и статистика НХЛ"):
+        t1, t2 = st.tabs([h_t, a_t])
+        for tab, tm in zip([t1, t2], [h_t, a_t]):
+            with tab:
+                sk, gl = get_nhl_roster(nhl[tm]["a"] if nhl else tm)
+                if not gl.empty:
+                    st.dataframe(gl, hide_index=True, use_container_width=True)
+                if not sk.empty:
+                    st.dataframe(sk, hide_index=True, use_container_width=True)
+                if gl.empty and sk.empty:
+                    st.info("Составы временно недоступны.")
