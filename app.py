@@ -253,7 +253,7 @@ vals, counts = np.unique(packed, return_counts=True)
 top_idx = np.argsort(-counts)[:5]
 top_list = [{"Точный счет": f"{vals[i]//100}:{vals[i]%100}", "Вероятность (%)": round(counts[i] / len(g1) * 100, 2)} for i in top_idx]
 st.dataframe(pd.DataFrame(top_list), use_container_width=True, hide_index=True)
-with tab2:
-show_roster_tab(gl1, sk1)
+    with tab2: show_roster_tab(gl1, sk1)
+    with tab3: show_roster_tab(gl2, sk2)
 with tab3:
 show_roster_tab(gl2, sk2)
