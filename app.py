@@ -252,10 +252,7 @@ st.subheader("🎯 Топ-5 точных счетов (60 мин)")
 packed = g1 * 100 + g2
 vals, counts = np.unique(packed, return_counts=True)
 top_idx = np.argsort(-counts)[:5]
-top_list = []
-    for idx in top_idx:
-    sc1, sc2 = divmod(vals[idx], 100)
-    prob = (counts[idx] / len(g1)) * 100
+top_list = [{"Точный счет": f"{vals[i]//100}:{vals[i]%100}", "Вероятность (%)": round(counts[i] / len(g1) * 100, 2)} for i in top_idx]
 top_list.append({"Точный счет": f"{sc1}:{sc2}", "Вероятность (%)": round(prob, 2)})
 st.dataframe(pd.DataFrame(top_list), use_container_width=True, hide_index=True)
 with tab2:
