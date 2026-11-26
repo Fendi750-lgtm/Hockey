@@ -8,7 +8,8 @@ st.title("🏒 Анализатор матчей (4 000 000 симуляций)"
 
 @st.cache_data(ttl=3600)
 def get_nhl_teams():
-    u = "https://api-web." + "://nhle.com" + "standings/now"
+    d = ".".join(["api-web", "nhle", "com"])
+    u = f"https://{d}/v1/standings/now"
     res = requests.get(u, timeout=10).json()
     teams = {}
     for t in res["standings"]:
