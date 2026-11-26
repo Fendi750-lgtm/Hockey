@@ -194,7 +194,7 @@ def get_nhl_roster(abbrev):
     except Exception as e:
         st.warning(f"Не удалось загрузить состав {abbrev}: {e}")
         return pd.DataFrame(), pd.DataFrame()
-        def run_simulations(l1, l2, n=1_000_000):
+    def run_simulations(l1, l2, n=1_000_000):
     rng = np.random.default_rng()
 
     # 1. Bivariate Poisson
