@@ -253,9 +253,9 @@ packed = g1 * 100 + g2
 vals, counts = np.unique(packed, return_counts=True)
 top_idx = np.argsort(-counts)[:5]
 top_list = []
-for idx in top_idx:
-sc1, sc2 = divmod(vals[idx], 100)
-prob = (counts[idx] / len(g1)) * 100
+    for idx in top_idx:
+    sc1, sc2 = divmod(vals[idx], 100)
+    prob = (counts[idx] / len(g1)) * 100
 top_list.append({"Точный счет": f"{sc1}:{sc2}", "Вероятность (%)": round(prob, 2)})
 st.dataframe(pd.DataFrame(top_list), use_container_width=True, hide_index=True)
 with tab2:
