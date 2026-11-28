@@ -67,7 +67,6 @@ def fetch_nhl_schedule_and_standings():
         pass
 
     return matches, team_stats
-
 @st.cache_data(ttl=1800)
 def fetch_nhl_last_10_rosters_and_shots(team_abbrev: str):
     """Анализирует последние >=10 сыгранных матчей команды: броски, блокировки и прогноз состава"""
@@ -132,11 +131,6 @@ class HockeyMatchSimulator:
 
         h_pp_boost = (home_stats['pp_pct'] / 100.0) * (1.0 - away_stats['pk_pct'] / 100.0) * 3.5
         a_pp_boost = (away_stats['pp_pct'] / 100.0) * (1.0 - home_stats['pk_pct'] / 100.0) * 3.5
-
-        lambda_home = max(0.5, (h_off * h_def_factor * home_ice_advantage) + h_pp_boost - away_stats['goalie_gsax_per60'])
-        lambda_away = max(0.5, (a_off * a_def_factor) + a_pp_boost - home_stats['goalie_gsax_per60'])
-        return round(lambda_home, 3), round(lambda_away, 3)
-
     def _sim_bivariate_poisson(self, l1: float, l2: float, n: int, l3: float = 0.12):
         x1 = self.rng.poisson(max(0.05, l1 - l3), n)
         x2 = self.rng.poisson(max(0.05, l2 - l3), n)
@@ -225,6 +219,21 @@ class HockeyMatchSimulator:
         return {"lambdas": (l1, l2), "markets": markets, "top_5_scores": top_5_scores}
 
 # --- ИНТЕРФЕЙС ПРИЛОЖЕНИЯ ---
+st.title("🏒 Хоккейный Анализатор (500K симуляций)")
+
+league = st.selectbox(
+    "Выберите лигу:",
+    ["NHL (НХЛ — Автозагрузка API)", "KHL (КХЛ)", "Liiga (Финляндия)",
+     "Extraliga (Чехия)", "DEL (Германия)", "SHL (Швеция)", "NL (Швейцария)", "EHL (Норвегия)"]
+)
+
+home_default = {"name": "Хозяева", "xg_per60": 3.05, "xga_per60": 2.60, "hdcf_pct": 52.0, "pp_pct": 22.0, "pk_pct": 80.5, "goalie_gsax_per60": 0.10}
+away_default = {"name": "Гости", "xg_per60": 2.85, "xga_per60": 2.80, "hdcf_pct": 49.0, "pp_pct": 20.0, "pk_pct": 79.0, "goalie_gsax_per60": 0.00}
+home_adv, away_adv = None, None
+
+        lambda_home = max(0.5, (h_off * h_def_factor * home_ice_advantage) + h_pp_boost - away_stats['goalie_gsax_per60'])
+        lambda_away = max(0.5, (a_off * a_def_factor) + a_pp_boost - home_stats['goalie_gsax_per60'])
+        return round(lambda_home, 3), round(lambda_away, 3)
 if "NHL" in league:
     with st.spinner("Загрузка матчей на ближайшие 24 часа из API НХЛ..."):
         nhl_matches, nhl_stats = fetch_nhl_schedule_and_standings()
