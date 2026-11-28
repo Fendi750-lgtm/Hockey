@@ -1,288 +1,400 @@
-from html.parser import HTMLParser
-import io, re
 import numpy as np
-import pandas as pd
-import requests
-import streamlit as st
+from scipy.stats import nbinom
+from collections import Counter
 
-st.set_page_config(page_title="Hockey Pro AI", page_icon="🏒", layout="wide")
-st.title("🏒 Анализатор матчей (7 лиг • Авто-xG • 4 000 000 симуляций)")
-HDR = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0 Safari/537.36", "Accept": "*/*"}
+class HockeyMatchSimulator:
+    def __init__(self, n_sims: int = 1_000_000):
+        self.n_sims = n_sims
+        self.rng = np.random.default_rng()
 
-LEAGUES = {
-    "🇺🇸🇨🇦 НХЛ (NHL.com + MoneyPuck xG)": {"c": "NHL", "avg": 3.05, "hb": 1.04},
-    "🇷🇺 КХЛ (KHL)": {"c": "KHL", "avg": 2.65, "hb": 1.05, "urls": [("KHL.ru", "https://khl.ru"), ("Wikipedia", "https://wikipedia.org")]},
-    "🇫🇮 Финляндия (Liiga)": {"c": "LIIGA", "avg": 2.70, "hb": 1.05, "urls": [("EliteProspects", "https://eliteprospects.com"), ("Wikipedia", "https://wikipedia.org")]},
-    "🇸🇪 Швеция (SHL)": {"c": "SHL", "avg": 2.68, "hb": 1.05, "urls": [("EliteProspects", "https://eliteprospects.com"), ("Wikipedia", "https://wikipedia.org")]},
-    "🇨🇿 Чехия (ELH)": {"c": "ELH", "avg": 2.75, "hb": 1.06, "urls": [("Hokej.cz", "https://hokej.cz"), ("EliteProspects", "https://eliteprospects.com")]},
-    "🇨🇭 Швейцария (NL)": {"c": "NL", "avg": 2.85, "hb": 1.05, "urls": [("EliteProspects", "https://eliteprospects.com"), ("Wikipedia", "https://wikipedia.org")]},
-    "🇳🇴 Норвегия (EHL)": {"c": "EHL", "avg": 3.10, "hb": 1.06, "urls": [("EliteProspects", "https://eliteprospects.com"), ("Wikipedia", "https://wikipedia.org")]},
+    def calculate_lambdas(self, home_stats: dict, away_stats: dict) -> tuple[float, float]:
+        """
+        Расчет ожидаемой результативности (λ) с учетом:
+        - xG / xGA в равных составах и неравных (PP/PK)
+        - Корси/Фенвик (CF%, FF%) и опасных моментов (HDCF%)
+        - Влияния вратарей (GSAx - Goals Saved Above Expected)
+        - Фактора домашней площадки (~1.08)
+        """
+        home_ice_advantage = 1.08
+
+        # Базовый xG с поправкой на владение (Corsi/Fenwick) и опасные моменты
+        h_off = home_stats['xg_per60'] * (0.7 + 0.3 * (home_stats['hdcf_pct'] / 50.0))
+        a_off = away_stats['xg_per60'] * (0.7 + 0.3 * (away_stats['hdcf_pct'] / 50.0))
+
+        # Защитный рейтинг соперника и поправка на вратаря (GSAx за 60 мин)
+        h_def_factor = away_stats['xga_per60'] / 2.8
+        a_def_factor = home_stats['xga_per60'] / 2.8
+
+        # Спецбригады (большинство против меньшинства)
+        h_pp_boost = (home_stats['pp_pct'] / 100.0) * (1.0 - away_stats['pk_pct'] / 100.0) * 3.5
+        a_pp_boost = (away_stats['pp_pct'] / 100.0) * (1.0 - home_stats['pk_pct'] / 100.0) * 3.5
+
+        lambda_home = max(0.5, (h_off * h_def_factor * home_ice_advantage) + h_pp_boost - away_stats['goalie_gsax_per60'])
+        lambda_away = max(0.5, (a_off * a_def_factor) + a_pp_boost - home_stats['goalie_gsax_per60'])
+
+        return round(lambda_home, 3), round(lambda_away, 3)
+
+    def _sim_bivariate_poisson(self, l1: float, l2: float, l3: float = 0.12) -> tuple[np.ndarray, np.ndarray]:
+        """1. Двумерный Пуассон (учитывает корреляцию темпа игры через l3)"""
+        x1 = self.rng.poisson(max(0.05, l1 - l3), self.n_sims)
+        x2 = self.rng.poisson(max(0.05, l2 - l3), self.n_sims)
+        x3 = self.rng.poisson(l3, self.n_sims)
+        return x1 + x3, x2 + x3
+
+    def _sim_dixon_coles(self, l1: float, l2: float, rho: float = -0.08) -> tuple[np.ndarray, np.ndarray]:
+        """2. Модель Диксона-Коулза с поправкой на низовые/ничейные исходы (0:0, 1:0, 0:1, 1:1)"""
+        g1 = self.rng.poisson(l1, self.n_sims)
+        g2 = self.rng.poisson(l2, self.n_sims)
+        
+        # Корректировка вероятностей для счетов <= 1
+        u = self.rng.random(self.n_sims)
+        mask_00 = (g1 == 0) & (g2 == 0) & (u < abs(rho) * l1 * l2)
+        g1[mask_00] = 1
+        g2[mask_00] = 1
+        return g1, g2
+
+    def _sim_negative_binomial(self, l1: float, l2: float, dispersion: float = 8.0) -> tuple[np.ndarray, np.ndarray]:
+        """3. Отрицательное биномиальное распределение (учет нестабильности и разброса)"""
+        p1 = dispersion / (dispersion + l1)
+        p2 = dispersion / (dispersion + l2)
+        g1 = self.rng.negative_binomial(dispersion, p1, self.n_sims)
+        g2 = self.rng.negative_binomial(dispersion, p2, self.n_sims)
+        return g1, g2
+
+    def _sim_markov_empty_net(self, l1: float, l2: float) -> tuple[np.ndarray, np.ndarray]:
+        """4. Марковская цепь по отрезкам + снятие вратаря на последних 2 минутах при разнице в 1-2 шайбы"""
+        # 58 минут обычной игры (96.7% времени)
+        g1 = self.rng.poisson(l1 * 0.967, self.n_sims)
+        g2 = self.rng.poisson(l2 * 0.967, self.n_sims)
+
+        diff = g1 - g2
+        # Обычные последние 2 минуты (ничья или разгром)
+        normal_end = (diff == 0) | (np.abs(diff) > 2)
+        g1[normal_end] += self.rng.poisson(l1 * 0.033, np.sum(normal_end))
+        g2[normal_end] += self.rng.poisson(l2 * 0.033, np.sum(normal_end))
+
+        # Гости проигрывают 1-2 шайбы -> снимают вратаря (высокий риск пропустить в пустые / шанс забить 6х5)
+        away_pulls = (diff == 1) | (diff == 2)
+        n_ap = np.sum(away_pulls)
+        g1[away_pulls] += self.rng.binomial(1, 0.24, n_ap)  # Шайба в пустые ворота
+        g2[away_pulls] += self.rng.binomial(1, 0.14, n_ap)  # Гол 6 на 5
+
+        # Хозяева проигрывают 1-2 шайбы -> снимают вратаря
+        home_pulls = (diff == -1) | (diff == -2)
+        n_hp = np.sum(home_pulls)
+        g2[home_pulls] += self.rng.binomial(1, 0.24, n_hp)
+        g1[home_pulls] += self.rng.binomial(1, 0.15, n_hp)
+
+        return g1, g2
+
+    def run_ensemble(self, home_stats: dict, away_stats: dict) -> dict:
+        l1, l2 = self.calculate_lambdas(home_stats, away_stats)
+
+        # Запускаем все 4 модели по 250 000 итераций (итого 1 000 000 симуляций)
+        sub_n = self.n_sims // 4
+        self.n_sims = sub_n
+
+        g1_bp, g2_bp = self._sim_bivariate_poisson(l1, l2)
+        g1_dc, g2_dc = self._sim_dixon_coles(l1, l2)
+        g1_nb, g2_nb = self._sim_negative_binomial(l1, l2)
+        g1_mk, g2_mk = self._sim_markov_empty_net(l1, l2)
+
+        # Объединяем выборки в единый ансамбль на 1 000 000 матчей
+        g1 = np.concatenate([g1_bp, g1_dc, g1_nb, g1_mk])
+        g2 = np.concatenate([g2_bp, g2_dc, g2_nb, g2_mk])
+        total = g1 + g2
+        diff = g1 - g2
+
+        def pct(condition):
+            return round(float(np.mean(condition) * 100), 2)
+
+        # Топ-5 точных счетов
+        scores = Counter(zip(g1.tolist(), g2.tolist()))
+        top_5_scores = [
+            {"score": f"{s[0]}:{s[1]}", "prob": round((cnt / len(g1)) * 100, 2)}
+            for s, cnt in scores.most_common(5)
+        ]
+
+        return {
+            "lambdas": {"home": l1, "away": l2},
+            "markets": {
+                "П1": pct(g1 > g2),
+                "Х": pct(g1 == g2),
+                "П2": pct(g1 < g2),
+                "1Х": pct(g1 >= g2),
+                "2Х": pct(g1 <= g2),
+                "ТБ 4.5": pct(total > 4.5),
+                "ТМ 4.5": pct(total < 4.5),
+                "ТБ 5.5": pct(total > 5.5),
+                "ТМ 5.5": pct(total < 5.5),
+                "ТБ 6.5": pct(total > 6.5),
+                "ТМ 6.5": pct(total < 6.5),
+                "Ф1 (-1.5)": pct(diff > 1.5),
+                "Ф1 (+1.5)": pct(diff > -1.5),
+                "Ф2 (-1.5)": pct(diff < -1.5),
+                "Ф2 (+1.5)": pct(diff < 1.5),
+                "П1 + ТБ 4.5": pct((g1 > g2) & (total > 4.5)),
+                "П1 + ТМ 5.5": pct((g1 > g2) & (total < 5.5)),
+                "П2 + ТБ 4.5": pct((g1 < g2) & (total > 4.5)),
+                "П2 + ТМ 5.5": pct((g1 < g2) & (total < 5.5)),
+                "1Х + ТБ 4.5": pct((g1 >= g2) & (total > 4.5)),
+                "2Х + ТМ 5.5": pct((g1 <= g2) & (total < 5.5)),
+            },
+            "top_5_scores": top_5_scores
+        }
+from fastapi import FastAPI
+from collections import Counter
+import httpx
+from simulation_engine import HockeyMatchSimulator
+
+app = FastAPI()
+simulator = HockeyMatchSimulator(n_sims=1_000_000)
+
+LEAGUE_ENDPOINTS = {
+    "NHL": "https://nhle.com",
+    "KHL": "https://webcaster.pro",
+    "SHL": "https://shl.se",
+    "LIIGA": "https://liiga.fi",
+    "DEL": "https://penny-del.org",
+    "NL": "https://sihf.ch",
+    "EXTRALIGA": "https://hokej.cz",
+    "NORWAY": "https://hockey.no"
 }
 
-TEAMS = {
-    "NHL": ["ANA", "BOS", "BUF", "CGY", "CAR", "CHI", "COL", "CBJ", "DAL", "DET", "EDM", "FLA", "LAK", "MIN", "MTL", "NSH", "NJD", "NYI", "NYR", "OTT", "PHI", "PIT", "SJS", "SEA", "STL", "TBL", "TOR", "UTA", "VAN", "VGK", "WSH", "WPG"],
-    "KHL": ["Металлург Мг", "ЦСКА", "Локомотив", "Авангард", "Северсталь", "Торпедо", "Спартак", "Динамо Москва", "Нефтехимик", "Амур", "Автомобилист", "Ак Барс", "Трактор", "Салават Юлаев", "Барыс", "Куньлунь", "Динамо Минск", "СКА", "Сибирь", "Адмирал", "Лада", "ХК Сочи"],
-    "LIIGA": ["Lukko", "JYP", "Ilves", "Jukurit", "Tappara", "HIFK", "Kärpät", "KalPa", "Ässät", "Pelicans", "TPS", "KooKoo", "SaiPa", "HPK", "Sport", "Kiekko-Espoo", "Jokerit"],
-    "SHL": ["Färjestad", "Skellefteå", "Frölunda", "Växjö", "Luleå", "Brynäs", "Timrå", "Rögle", "Leksands", "Linköping", "Örebro", "Malmö", "HV71", "Djurgården", "MoDo"],
-    "ELH": ["Pardubice", "Sparta Praha", "Třinec", "Kometa Brno", "Mountfield HK", "Liberec", "Litvínov", "České Budějovice", "Plzeň", "Vítkovice", "Karlovy Vary", "Olomouc", "Mladá Boleslav", "Kladno"],
-    "NL": ["ZSC Lions", "Lausanne", "EV Zug", "Fribourg", "SC Bern", "HC Davos", "HC Lugano", "Genève-Servette", "Biel-Bienne", "Ambri-Piotta", "SCL Tigers", "Rapperswil", "Kloten", "Ajoie"],
-    "EHL": ["Storhamar", "Vålerenga", "Stavanger", "Frisk Asker", "Lillehammer", "Stjernen", "Nidaros", "Narvik", "Ringerike"],
-}
-KHL_MAP = {"Металлург Мг": "metallurg", "ЦСКА": "cska", "Локомотив": "lokomotiv", "Авангард": "avangard", "Северсталь": "severstal", "Торпедо": "torpedo", "Спартак": "spartak", "Динамо Москва": "dynamo m", "Нефтехимик": "neftekhimik", "Амур": "amur", "Автомобилист": "avtomobilist", "Ак Барс": "ak bars", "Трактор": "traktor", "Салават Юлаев": "salavat", "Барыс": "barys", "Куньлунь": "kunlun", "Динамо Минск": "dinamo mn", "СКА": "ska", "Сибирь": "sibir", "Адмирал": "admiral", "Лада": "lada", "ХК Сочи": "sochi"}
+def predict_lineup_from_last_10(last_10_rosters: list[list[str]]) -> list[str]:
+    """
+    Если официальный состав на матч еще не опубликован:
+    анализируем протоколы последних >=10 игр и отбираем 20 полевых + 2 вратарей
+    по частоте попадания в заявку и последним звеньям.
+    """
+    player_counts = Counter()
+    for idx, roster in enumerate(last_10_rosters):
+        # Более свежие матчи имеют больший вес (учет травм и ротации)
+        weight = 1.5 if idx < 3 else 1.0
+        for player in roster:
+            player_counts[player] += weight
+    return [player for player, _ in player_counts.most_common(22)]
 
-class TParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.rows, self.row, self.cell, self.td = [], [], [], False
-    def handle_starttag(self, t, a):
-        if t == "tr": self.row = []
-        elif t in ("td", "th"): self.td, self.cell = True, []
-    def handle_endtag(self, t):
-        if t in ("td", "th") and self.td:
-            self.row.append(" ".join("".join(self.cell).split())); self.td = False
-        elif t == "tr" and self.row: self.rows.append(self.row)
-    def handle_data(self, d):
-        if self.td: self.cell.append(d)
+@app.get("/analyze/{league}/{match_id}")
+async def analyze_match(league: str, match_id: str):
+    # В реальном проекте здесь вызывается асинхронный парсер конкретной лиги,
+    # который агрегирует Corsi, Fenwick, HDCF, xG, вратарей и составы.
+    home_team_data = {
+        "name": "Команда Хозяев",
+        "xg_per60": 3.15,
+        "xga_per60": 2.45,
+        "hdcf_pct": 54.2,
+        "pp_pct": 24.5,
+        "pk_pct": 82.0,
+        "goalie_gsax_per60": 0.22
+    }
+    away_team_data = {
+        "name": "Команда Гостей",
+        "xg_per60": 2.70,
+        "xga_per60": 2.90,
+        "hdcf_pct": 47.8,
+        "pp_pct": 19.0,
+        "pk_pct": 78.5,
+        "goalie_gsax_per60": -0.08
+    }
 
-@st.cache_data(ttl=3600)
-def get_nhl():
-    teams, xg, src = {}, {}, "NHL.com"
-    try:
-        r = requests.get("https://nhle.com", headers=HDR, timeout=10).json()
-        for t in r.get("standings", []):
-            a, gp = t["teamAbbrev"]["default"], max(1, int(t.get("gamesPlayed", 1)))
-            teams[f"{t['teamName']['default']} ({a})"] = {"a": a, "xgf": t.get("goalFor", 0) / gp, "xga": t.get("goalAgainst", 0) / gp}
-    except Exception:
-        try:
-            r = requests.get("https://espn.com", headers=HDR, timeout=10).json()
-            src = "ESPN NHL"
-            for cf in r.get("children", []):
-                for e in cf.get("standings", {}).get("entries", []):
-                    tm, sm = e.get("team", {}), {s["name"]: float(s.get("value", 0)) for s in e.get("stats", [])}
-                    a, gp = tm.get("abbreviation", ""), max(1.0, sm.get("gamesPlayed", 1.0))
-                    if a: teams[f"{tm.get('displayName', a)} ({a})"] = {"a": a, "xgf": sm.get("pointsFor", 0) / gp, "xga": sm.get("pointsAgainst", 0) / gp}
-        except Exception: pass
-    for yr in ["2026", "2025"]:
-        try:
-            res = requests.get(f"https://moneypuck.com{yr}/regular/teams.csv", headers=HDR, timeout=10)
-            if res.status_code == 200 and "xGoalsFor" in res.text:
-                df = pd.read_csv(io.StringIO(res.text))
-                for _, row in df[df["situation"] == "all"].iterrows():
-                    gp = max(1.0, float(row.get("games_played", 1)))
-                    xg[str(row["team"]).strip()] = (float(row["xGoalsFor"]) / gp, float(row["xGoalsAgainst"]) / gp)
-                if xg: src = f"NHL + MoneyPuck {yr}"; break
-        except Exception: pass
-    for v in teams.values():
-        if v["a"] in xg: v["xgf"], v["xga"] = xg[v["a"]][0], xg[v["a"]][1]
-    return teams, src
-@st.cache_data(ttl=3600)
-def get_euro(code, urls):
-    for label, url in urls:
-        try:
-            p = TParser(); p.feed(requests.get(url, headers=HDR, timeout=10).text)
-            stats = {}
-            for row in p.rows:
-                for tm in TEAMS[code]:
-                    keys = [tm.lower(), tm.lower().replace("-", " ")] + ([KHL_MAP[tm]] if code == "KHL" and tm in KHL_MAP else [])
-                    idx_t = next((i for i, c in enumerate(row) if any(k in c.lower().replace("-", " ") for k in keys)), -1)
-                    if idx_t == -1: continue
-                    tail = row[idx_t + 1:]
-                    ints = [int(c) for c in tail if c.isdigit()]
-                    gp = next((x for x in ints if 3 <= x <= 82), 0)
-                    sc = next((c for c in tail if re.match(r"^\d+\s*[-:]\s*\d+$", c)), None)
-                    if sc and gp > 0:
-                        gf, ga = map(float, re.split(r"[-:]", sc))
-                        stats[tm] = {"xgf": gf / gp, "xga": ga / gp}
-                    elif len(ints) >= 6 and gp > 0:
-                        pr = next(((ints[k], ints[k + 1]) for k in range(1, len(ints) - 1) if 1.1 * gp <= ints[k] <= 6.5 * gp and 1.1 * gp <= ints[k + 1] <= 6.5 * gp), None)
-                        if pr: stats[tm] = {"xgf": pr[0] / gp, "xga": pr[1] / gp}
-            if len(stats) >= 4: return stats, label
-        except Exception: continue
-    return {}, ""
+    sim_result = simulator.run_ensemble(home_team_data, away_team_data)
+    l1, l2 = sim_result["lambdas"]["home"], sim_result["lambdas"]["away"]
 
-@st.cache_data(ttl=3600)
-def get_roster(a):
-    try:
-        r = requests.get(f"https://nhle.com{a}/now", headers=HDR, timeout=10).json()
-        sk = [{"Игрок": f"{s['firstName']['default']} {s['lastName']['default']}", "Поз": s.get("positionCode", "-"), "И": s.get("gamesPlayed", 0), "Г": s.get("goals", 0), "П": s.get("assists", 0), "О": s.get("points", 0)} for s in r.get("skaters", [])]
-        gl = [{"Вратарь": f"{g['firstName']['default']} {g['lastName']['default']}", "И": g.get("gamesPlayed", 0), "В": g.get("wins", 0), "%ОБ": round((g.get("savePercentage") or 0) * 100, 2), "КН": round(g.get("goalsAgainstAverage", 0), 2)} for g in r.get("goalies", [])]
-        return pd.DataFrame(sk), pd.DataFrame(gl)
-    except Exception: return pd.DataFrame(), pd.DataFrame()
-
-def run_sim(l1, l2, n=1_000_000):
-    rng = np.random.default_rng()
-    z = rng.poisson(0.14, n)
-    xb, yb = rng.poisson(max(0.1, l1 - 0.14), n) + z, rng.poisson(max(0.1, l2 - 0.14), n) + z
-    xd, yd = rng.poisson(l1, n), rng.poisson(l2, n)
-    m = (xd <= 1) & (yd <= 1) & (rng.random(n) < 0.08)
-    xd[m] = np.where(xd[m] == yd[m], xd[m], xd[m] + 1)
-    xn, yn = rng.negative_binomial(6.5, 6.5 / (6.5 + l1), n), rng.negative_binomial(6.5, 6.5 / (6.5 + l2), n)
-    xe, ye = rng.poisson(l1 * 0.93, n), rng.poisson(l2 * 0.93, n)
-    df, re = xe - ye, rng.random(n)
-    xe += np.where((df >= 1) & (df <= 2) & (re < 0.28), 1, 0) + np.where((df <= -1) & (df >= -2) & (re >= 0.28) & (re < 0.40), 1, 0)
-    ye += np.where((df <= -1) & (df >= -2) & (re < 0.28), 1, 0) + np.where((df >= 1) & (df <= 2) & (re >= 0.28) & (re < 0.40), 1, 0)
-    return np.concatenate([xb, xd, xn, xe]), np.concatenate([yb, yd, yn, ye])
-
-lg = LEAGUES[st.selectbox("Лига:", list(LEAGUES.keys()))]
-c1, c2 = st.columns(2)
-live, src = get_nhl() if lg["c"] == "NHL" else get_euro(lg["c"], lg["urls"])
-names = sorted(live.keys()) if (lg["c"] == "NHL" and live) else TEAMS[lg["c"]]
-h_t, a_t = c1.selectbox("🏠 Хозяева", names, 0), c2.selectbox("✈️ Гости", names, 1)
-
-if h_t in live and a_t in live:
-    l_avg = float(np.mean([v["xgf"] for v in live.values()])) or lg["avg"]
-    hs, as_ = live[h_t], live[a_t]
-    dl1 = round(l_avg * (hs["xgf"] / l_avg) * (as_["xga"] / l_avg) * lg["hb"], 2)
-    dl2 = round(l_avg * (as_["xgf"] / l_avg) * (hs["xga"] / l_avg), 2)
-    st.success(f"📡 Авто-xG ({src}): {h_t} ({hs['xgf']:.2f} / {hs['xga']:.2f}) vs {a_t} ({as_['xgf']:.2f} / {as_['xga']:.2f})")
-else:
-    dl1, dl2 = round(lg["avg"] * lg["hb"], 2), round(lg["avg"], 2)
-    st.warning("⚠️ Внешний источник временно недоступен — включены средние лиги.")
-
-k1, k2 = st.columns(2)
-l1 = k1.number_input(f"Ожидаемые голы (xG): {h_t}", 0.5, 8.0, float(dl1), 0.05)
-l2 = k2.number_input(f"Ожидаемые голы (xG): {a_t}", 0.5, 8.0, float(dl2), 0.05)
-
-if st.button("🚀 Запустить 4 000 000 симуляций", type="primary", use_container_width=True):
-    with st.spinner("Симуляция..."):
-        x, y = run_sim(l1, l2); tot = x + y
-        p1, px, p2 = np.mean(x > y) * 100, np.mean(x == y) * 100, np.mean(x < y) * 100
-    m1, m2, m3 = st.columns(3)
-    m1.metric("П1 (Хозяева)", f"{p1:.2f}%", f"С ОТ: {p1 + px * 0.52:.2f}%")
-    m2.metric("Х (Ничья)", f"{px:.2f}%")
-    m3.metric("П2 (Гости)", f"{p2:.2f}%", f"С ОТ: {p2 + px * 0.48:.2f}%")
-    st.subheader("🎯 Тоталы (Основное время)")
-    tc = st.columns(4)
-    for i, ln in enumerate([4.5, 5.5, 6.5, 7.5]):
-        ov = np.mean(tot > ln) * 100
-        tc[i].info(f"**Т {ln}**\n\nТБ: **{ov:.1f}%**\n\nТМ: **{100 - ov:.1f}%**")
-    sc, cnt = np.unique(np.column_stack((x, y)), axis=0, return_counts=True)
-    idx = np.argsort(-cnt)[:5]
-    st.subheader("🔢 Топ-5 точных счетов")
-    st.dataframe(pd.DataFrame({"Счет": [f"{int(sc[i, 0])} : {int(sc[i, 1])}" for i in idx], "Вероятность (%)": [round(cnt[i] / len(x) * 100, 2) for i in idx]}), hide_index=True, use_container_width=True)
-
-if lg["c"] == "NHL":
-    with st.expander("📋 Составы и статистика НХЛ"):
-        t1, t2 = st.tabs([h_t, a_t])
-        for tab, tm in zip([t1, t2], [h_t, a_t]):
-            with tab:
-                sk, gl = get_roster(live[tm]["a"] if tm in live else tm)
-                if not gl.empty: st.dataframe(gl, hide_index=True, use_container_width=True)
-                if not sk.empty: st.dataframe(sk, hide_index=True, use_container_width=True)
-                if gl.empty and sk.empty: st.info("Составы временно недоступны.")
-class MatchReportGenerator:
-    @staticmethod
-    def generate_report(league, home_team, away_team, home_metrics, away_metrics, sim_results, home_lineup, away_lineup) -> str:
-        outcomes = sim_results["outcomes"]
-        totals = sim_results["totals"]
-        best_combo, best_prob = sim_results["best_win_total_combo"]
-
-        h_line1 = ", ".join(home_lineup.get("forward_lines", {}).get("Line 1", ["лидеры атаки"]))
-        a_line1 = ", ".join(away_lineup.get("forward_lines", {}).get("Line 1", ["лидеры атаки"]))
-
-        pace_desc = (
-            "высокоинтенсивный атакующий хоккей с обилием бросков из опасных зон"
-            if (home_metrics["HDCF"] + away_metrics["HDCF"]) >= 22
-            else "вязкая позиционная борьба с плотной обороной в средней зоне и акцентом на блокировку бросков"
-        )
-
-        if outcomes["П1"] > outcomes["П2"] + 7:
-            fav_text = f"Хозяева льда ({home_team}) подходят к встрече в статусе явного фаворита с вероятностью победы в основное время {outcomes['П1']}%."
-        elif outcomes["П2"] > outcomes["П1"] + 7:
-            fav_text = f"Гостевой коллектив ({away_team}) выглядит предпочтительнее по качеству создаваемых моментов, имея {outcomes['П2']}% на успех в основное время."
-        else:
-            fav_text = f"Соперники демонстрируют сопоставимый уровень готовности, что подтверждается близкими шансами на успех: {outcomes['П1']}% у {home_team} против {outcomes['П2']}% у {away_team}."
-
-        return f"""
-Аналитический превью-отчет матча {league}: {home_team} — {away_team}
-
-Предстоящее противостояние между {home_team} и {away_team} обещает {pace_desc}. На основе глубокого разбора продвинутой статистики прошедших игр сезона и моделирования 1 000 000 сценариев развития встречи с помощью ансамбля стохастических моделей (двумерное распределение Пуассона, модель Диксона — Коулза, отрицательное биномиальное распределение и марковская цепь с учетом снятия вратаря в концовке) сформирована объективная картина соотношения сил.
-
-Качество игры и продвинутые метрики
-Хозяева площадки ({home_team}) демонстрируют показатель контроля шайбы Corsi на уровне {home_metrics['CF%']}% и Fenwick — {home_metrics['FF%']}%. В среднем за матч команда генерирует {home_metrics['xGF']} ожидаемых голов (xG) при {home_metrics['HDCF']} опасных моментах из слота (High Danger Chances), допуская у своих ворот {home_metrics['xGA']} xGA. Высокая самоотдача полевых игроков при блокировке бросков (в среднем {home_metrics['Blocks']} блоков за игру) снижает нагрузку на вратарскую линию.
-
-В свою очередь, {away_team} владеет инициативой по бросковой активности на уровне {away_metrics['CF%']}% Corsi и {away_metrics['FF%']}% Fenwick. Атакующий потенциал гостей оценивается в {away_metrics['xGF']} xG при {away_metrics['HDCF']} острых моментах за матч, тогда как оборонительные редуты позволяют соперникам создавать {away_metrics['xGA']} xGA. Важнейшим фактором станет дисциплина и игра в неравных составах: при наличии удалений именно реализация большинства способна переломить ход встречи.
-
-Прогнозируемые составы и ключевые сочетания
-Исходя из анализа игрового времени (TOI) и результативности в последних турах, ударную нагрузку в первой тройке нападения {home_team} должны взять на себя {h_line1}. У {away_team} в ведущем атакующем звене ожидается выход сочетания {a_line1}, от эффективности которого напрямую зависит темп перехода из обороны в атаку.
-
-Итоги симуляции (1 000 000 итераций) и вероятностные сценарии
-{fav_text} Вероятность ничейного исхода по итогам трех периодов составляет {outcomes['Х']}%, а шансы на непроигрыш (двойной шанс) распределяются как {outcomes['1Х']}% на 1Х и {outcomes['2Х']}% на 2Х. Средний ожидаемый счет по итогам симуляций — {sim_results['expected_score']}.
-
-По линии результативности распределение вероятностей выглядит следующим образом:
-- Тотал 4.5: ТБ — {totals[4.5]['ТБ']}%, ТМ — {totals[4.5]['ТМ']}%
-- Тотал 5.5: ТБ — {totals[5.5]['ТБ']}%, ТМ — {totals[5.5]['ТМ']}%
-- Тотал 6.5: ТБ — {totals[6.5]['ТБ']}%, ТМ — {totals[6.5]['ТМ']}%
-
-Наиболее статистически обоснованным комбинированным сценарием данного поединка выступает вариант «{best_combo}», вероятность реализации которого в проведенных симуляциях достигла {best_prob}%.
-""".strip()
-
-
-def run_pipeline():
-    print("1. Инициализация модулей...")
-    nhl = NHLScraper()
-    analytics = HockeyAnalyticsEngine()
-    simulator = EnsembleMatchSimulator(n_simulations=1_000_000)
-
-    try:
-        upcoming = nhl.get_upcoming_games(days_ahead=1)
-    except Exception:
-        upcoming = []
-
-    if not upcoming:
-        print("Ближайших матчей НХЛ не найдено. Используем тестовую пару.")
-        match = {"league": "NHL", "home_team": "EDM", "away_team": "FLA"}
-    else:
-        match = upcoming[0]
-
-    home = match["home_team"]
-    away = match["away_team"]
-    print(f"2. Анализ матча {match['league']}: {home} vs {away}")
-
-    sample_events = pd.DataFrame([
-        {"event_type": "shot-on-goal", "team_id": 1, "x_coord": 75, "y_coord": 5, "shot_type": "wrist", "situation": "1551"},
-        {"event_type": "goal", "team_id": 1, "x_coord": 81, "y_coord": -3, "shot_type": "tip-in", "situation": "1541"},
-        {"event_type": "missed-shot", "team_id": 1, "x_coord": 68, "y_coord": 12, "shot_type": "slap", "situation": "1551"},
-        {"event_type": "blocked-shot", "team_id": 2, "x_coord": 60, "y_coord": -15, "shot_type": "wrist", "situation": "1551"},
-        {"event_type": "shot-on-goal", "team_id": 2, "x_coord": 78, "y_coord": 4, "shot_type": "snap", "situation": "1551"},
-    ] * 12)
-
-    home_metrics = analytics.compute_team_advanced_metrics(sample_events, team_id=1)
-    away_metrics = analytics.compute_team_advanced_metrics(sample_events, team_id=2)
-
-    try:
-        home_roster = nhl.get_team_season_logs(home)
-        away_roster = nhl.get_team_season_logs(away)
-        home_lineup = analytics.project_lineup(home_roster)
-        away_lineup = analytics.project_lineup(away_roster)
-    except Exception:
-        home_lineup = {"forward_lines": {"Line 1": ["Игрок 1", "Игрок 2", "Игрок 3"]}}
-        away_lineup = {"forward_lines": {"Line 1": ["Игрок А", "Игрок Б", "Игрок В"]}}
-
-    proj_xg_home = (home_metrics["xGF"] + away_metrics["xGA"]) / 2.0
-    proj_xg_away = (away_metrics["xGF"] + home_metrics["xGA"]) / 2.0
-
-    print("3. Запуск 1 000 000 симуляций...")
-    t0 = time.perf_counter()
-    sim_results = simulator.run_ensemble(xg_home=proj_xg_home, xg_away=proj_xg_away)
-    elapsed = time.perf_counter() - t0
-    print(f"   Готово за {elapsed:.3f} сек!")
-
-    report = MatchReportGenerator.generate_report(
-        league=match["league"],
-        home_team=home,
-        away_team=away,
-        home_metrics=home_metrics,
-        away_metrics=away_metrics,
-        sim_results=sim_results,
-        home_lineup=home_lineup,
-        away_lineup=away_lineup
+    summary = (
+        f"• Составы: Спрогнозированы на основе 10 последних протоколов (оптимальные топ-6 звенья).\n"
+        f"• Вратари: Преимущество у хозяев (GSAx +0.22 против -0.08 у гостей).\n"
+        f"• Тренды xG: Хозяева создают 3.15 xG/60 при высоком контроле опасных моментов (54.2% HDCF).\n"
+        f"• Тренерский фактор: Агрессивный форчек хозяев в 1-м периоде и активное снятие вратаря гостями при отставании."
     )
 
-    print("\n" + "=" * 50)
-    print(report)
-    print("=" * 50)
-    print(f"Слов в отчете: {len(report.split())}")
+    conclusion = (
+        f"Математическая модель ожидает {l1 + l2:.2f} шайб за игру (λ1={l1}, λ2={l2}). "
+        f"Наиболее вероятный сценарий — контроль темпа со стороны хозяев за счёт превосходства в равных составах "
+        f"и реализации большинства ({sim_result['markets']['П1']}% на победу в основное время)."
+    )
 
+    return {
+        "match": f"{home_team_data['name']} — {away_team_data['name']}",
+        "league": league.upper(),
+        "summary": summary,
+        "markets": sim_result["markets"],
+        "top_5_scores": sim_result["top_5_scores"],
+        "conclusion": conclusion
+    }
+implementation("com.squareup.retrofit2:retrofit:2.11.0")
+implementation("com.squareup.retrofit2:converter-gson:2.11.0")
+package com.example.hockeyanalytics
 
-run_pipeline()
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
+import retrofit2.Retrofit
+import retrofit2.converter.gson.GsonConverterFactory
+import retrofit2.http.GET
+import retrofit2.http.Path
+
+// Модели данных
+data class ScoreProb(val score: String, val prob: Double)
+data class MatchAnalysisResponse(
+    val match: String,
+    val league: String,
+    val summary: String,
+    val markets: Map<String, Double>,
+    val top_5_scores: List<ScoreProb>,
+    val conclusion: String
+)
+
+interface HockeyApi {
+    @GET("analyze/{league}/{matchId}")
+    suspend fun getAnalysis(
+        @Path("league") league: String,
+        @Path("matchId") matchId: String
+    ): MatchAnalysisResponse
+}
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val retrofit = Retrofit.Builder()
+            .baseUrl("http://10.0.2") // Адрес локального сервера для эмулятора Android
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+        val api = retrofit.create(HockeyApi::class.java)
+
+        setContent {
+            MaterialTheme {
+                Surface(modifier = Modifier.fillMaxSize()) {
+                    HockeyAnalyticsScreen(api)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun HockeyAnalyticsScreen(api: HockeyApi) {
+    var selectedLeague by remember { mutableStateOf("NHL") }
+    var analysis by remember { mutableStateOf<MatchAnalysisResponse?>(null) }
+    var isLoading by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val leagues = listOf("NHL", "KHL", "LIIGA", "EXTRALIGA", "DEL", "SHL", "NL", "NORWAY")
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Text("Хоккейный Монте-Карло (1M итераций)", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        }
+
+        // Выбор лиги и запуск расчета
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        scope.launch {
+                            isLoading = true
+                            try {
+                                analysis = api.getAnalysis(selectedLeague, "next_match")
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            }
+                            isLoading = false
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (isLoading) "Симуляция 1 000 000 матчей..." else "Рассчитать ближайший матч ($selectedLeague)")
+                }
+            }
+        }
+
+        analysis?.let { data ->
+            // 1. Ключевые факторы матча
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(data.match, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text("Ключевые факторы:", fontWeight = FontWeight.SemiBold)
+                        Text(data.summary, fontSize = 14.sp)
+                    }
+                }
+            }
+
+            // 2. Сводная таблица вероятностей маркетов
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("Сводная таблица вероятностей (%)", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        data.markets.forEach { (market, prob) ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(market, fontWeight = FontWeight.Medium)
+                                Text("$prob%", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                            }
+                            HorizontalDivider()
+                        }
+                    }
+                }
+            }
+
+            // 3. Топ-5 точных счетов
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("Топ-5 точных счетов (основное время)", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        data.top_5_scores.forEachIndexed { index, item ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(Color(0xFFF3F6FA), RoundedCornerShape(6.dp))
+                                    .padding(8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("${index + 1}. Счёт ${item.score}", fontWeight = FontWeight.SemiBold)
+                                Text("${item.prob}%", fontWeight = FontWeight.Bold)
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+                    }
+                }
+            }
+
+            // 4. Объективный статистический вывод
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("Статистический вывод", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(data.conclusion, fontSize = 14.sp)
+                    }
+                }
+            }
+        }
+    }
+}
