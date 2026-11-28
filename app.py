@@ -1,76 +1,99 @@
 import streamlit as st
 import pandas as pd
-from engine import fetch_nhl_schedule_and_standings, fetch_nhl_last_10, HockeyMatchSimulator
+from engine import get_league_data, fetch_last_10_protocols, HockeyMatchSimulator
 
 st.set_page_config(page_title="Hockey AI & Monte Carlo", page_icon="🏒", layout="centered")
 
 @st.cache_data(ttl=1800)
-def get_nhl_cached():
-    return fetch_nhl_schedule_and_standings()
+def cached_league(code: str):
+    return get_league_data(code)
 
 @st.cache_data(ttl=1800)
-def get_last10_cached(ab: str):
-    return fetch_nhl_last_10(ab)
+def cached_protocols(code: str, key: str, stat: dict):
+    return fetch_last_10_protocols(code, key, stat)
 
 st.title("🏒 Хоккейный Анализатор (500K)")
 
-league = st.selectbox(
-    "Выберите лигу:",
-    ["NHL (Автозагрузка API)", "KHL", "Liiga", "Extraliga", "DEL", "SHL", "NL", "EHL"]
-)
+LEAGUE_MAP = {
+    "NHL (НХЛ)": "NHL",
+    "KHL (КХЛ)": "KHL",
+    "Liiga (Финляндия)": "Liiga",
+    "Extraliga (Чехия)": "Extraliga",
+    "DEL (Германия)": "DEL",
+    "SHL (Швеция)": "SHL",
+    "NL (Швейцария)": "NL",
+    "EHL (Норвегия)": "EHL"
+}
 
-h_def = {"name": "Хозяева", "xg_per60": 3.05, "xga_per60": 2.60, "hdcf_pct": 52.0, "pp_pct": 22.0, "pk_pct": 80.5, "goalie_gsax_per60": 0.10}
-a_def = {"name": "Гости", "xg_per60": 2.85, "xga_per60": 2.80, "hdcf_pct": 49.0, "pp_pct": 20.0, "pk_pct": 79.0, "goalie_gsax_per60": 0.00}
-h_adv, a_adv = None, None
+selected_league_label = st.selectbox("Выберите лигу:", list(LEAGUE_MAP.keys()))
+league_code = LEAGUE_MAP[selected_league_label]
 
-if "NHL" in league:
-    with st.spinner("Загрузка матчей НХЛ на ближайшие 24 часа..."):
-        nhl_matches, nhl_stats = get_nhl_cached()
-    if nhl_matches:
-        sel = st.selectbox("Предстоящие матчи (24ч):", [m["label"] for m in nhl_matches])
-        m_obj = next(m for m in nhl_matches if m["label"] == sel)
-        h_def = nhl_stats.get(m_obj["home"], h_def)
-        a_def = nhl_stats.get(m_obj["away"], a_def)
-        with st.spinner("Анализ 10 последних протоколов..."):
-            h_adv = get_last10_cached(m_obj["home"])
-            a_adv = get_last10_cached(m_obj["away"])
+with st.spinner(f"Автозагрузка матчей и статистики {selected_league_label}..."):
+    matches, team_stats = cached_league(league_code)
 
-with st.expander("Параметры команд (xG, HDCF, спецбригады, вратари)"):
+h_key, a_key = None, None
+h_def = {"name": "Хозяева", "xg_per60": 3.00, "xga_per60": 2.65, "hdcf_pct": 51.5, "pp_pct": 21.5, "pk_pct": 80.5, "goalie_gsax_per60": 0.08}
+a_def = {"name": "Гости", "xg_per60": 2.80, "xga_per60": 2.80, "hdcf_pct": 49.0, "pp_pct": 19.5, "pk_pct": 79.0, "goalie_gsax_per60": 0.00}
+
+if matches:
+    sel_match = st.selectbox("📅 Предстоящие матчи (автозагрузка):", [m["label"] for m in matches])
+    m_obj = next(m for m in matches if m["label"] == sel_match)
+    h_key, a_key = m_obj["home"], m_obj["away"]
+    h_def = team_stats.get(h_key, h_def)
+    a_def = team_stats.get(a_key, a_def)
+elif team_stats:
+    st.info("Ближайших матчей в расписании нет — выберите любые две команды лиги из списка:")
+    teams_list = sorted(list(team_stats.keys()))
+    c_sel1, c_sel2 = st.columns(2)
+    with c_sel1:
+        h_key = st.selectbox("Команда хозяев:", teams_list, index=0)
+    with c_sel2:
+        a_key = st.selectbox("Команда гостей:", teams_list, index=min(1, len(teams_list) - 1))
+    h_def = team_stats[h_key]
+    a_def = team_stats[a_key]
+else:
+    st.warning("Сервер лиги временно недоступен — показаны базовые коэффициенты.")
+
+h_adv = cached_protocols(league_code, h_key or h_def["name"], h_def)
+a_adv = cached_protocols(league_code, a_key or a_def["name"], a_def)
+
+st.markdown(f"### 🆚 {h_def['name']} — {a_def['name']}")
+
+with st.expander("📊 Автозагруженные метрики команд (xG, HDCF, спецбригады, вратари)"):
     c1, c2 = st.columns(2)
     with c1:
-        h_name = st.text_input("Хозяева", h_def["name"])
-        h_xg = st.number_input("xG/60 (Хоз)", 1.0, 6.0, float(h_def["xg_per60"]), 0.05)
-        h_xga = st.number_input("xGA/60 (Хоз)", 1.0, 6.0, float(h_def["xga_per60"]), 0.05)
-        h_hdcf = st.number_input("HDCF% (Хоз)", 30.0, 70.0, float(h_def["hdcf_pct"]), 0.5)
-        h_pp = st.number_input("PP% (Хоз)", 5.0, 45.0, float(h_def["pp_pct"]), 0.5)
-        h_pk = st.number_input("PK% (Хоз)", 60.0, 95.0, float(h_def["pk_pct"]), 0.5)
-        h_gsax = st.number_input("Вратарь GSAx/60 (Хоз)", -1.5, 1.5, float(h_def["goalie_gsax_per60"]), 0.02)
+        st.markdown(f"**{h_def['name']}**")
+        st.write(f"• xG/60: **{h_def['xg_per60']}** | xGA/60: **{h_def['xga_per60']}**")
+        st.write(f"• Corsi: **{h_adv['corsi_pct']}%** | Fenwick: **{h_adv['fenwick_pct']}%**")
+        st.write(f"• HDCF%: **{h_def['hdcf_pct']}%** | PP/PK: **{h_def['pp_pct']}% / {h_def['pk_pct']}%**")
+        st.write(f"• Вратарь GSAx/60: **{h_def['goalie_gsax_per60']:+.2f}**")
     with c2:
-        a_name = st.text_input("Гости", a_def["name"])
-        a_xg = st.number_input("xG/60 (Гос)", 1.0, 6.0, float(a_def["xg_per60"]), 0.05)
-        a_xga = st.number_input("xGA/60 (Гос)", 1.0, 6.0, float(a_def["xga_per60"]), 0.05)
-        a_hdcf = st.number_input("HDCF% (Гос)", 30.0, 70.0, float(a_def["hdcf_pct"]), 0.5)
-        a_pp = st.number_input("PP% (Гос)", 5.0, 45.0, float(a_def["pp_pct"]), 0.5)
-        a_pk = st.number_input("PK% (Гос)", 60.0, 95.0, float(a_def["pk_pct"]), 0.5)
-        a_gsax = st.number_input("Вратарь GSAx/60 (Гос)", -1.5, 1.5, float(a_def["goalie_gsax_per60"]), 0.02)
+        st.markdown(f"**{a_def['name']}**")
+        st.write(f"• xG/60: **{a_def['xg_per60']}** | xGA/60: **{a_def['xga_per60']}**")
+        st.write(f"• Corsi: **{a_adv['corsi_pct']}%** | Fenwick: **{a_adv['fenwick_pct']}%**")
+        st.write(f"• HDCF%: **{a_def['hdcf_pct']}%** | PP/PK: **{a_def['pp_pct']}% / {a_def['pk_pct']}%**")
+        st.write(f"• Вратарь GSAx/60: **{a_def['goalie_gsax_per60']:+.2f}**")
 
 if st.button("🚀 Рассчитать матч (Ансамбль 500 000 симуляций)", use_container_width=True):
     sim = HockeyMatchSimulator(n_sims=500_000)
-    res = sim.run_ensemble(
-        {"xg_per60": h_xg, "xga_per60": h_xga, "hdcf_pct": h_hdcf, "pp_pct": h_pp, "pk_pct": h_pk, "goalie_gsax_per60": h_gsax},
-        {"xg_per60": a_xg, "xga_per60": a_xga, "hdcf_pct": a_hdcf, "pp_pct": a_pp, "pk_pct": a_pk, "goalie_gsax_per60": a_gsax}
-    )
+    res = sim.run_ensemble(h_def, a_def)
     l1, l2 = res["lambdas"]
-    st.success(f"Ожидаемые голы: **{h_name} (λ₁ = {l1})** — **{a_name} (λ₂ = {l2})**")
+
+    st.success(f"Ожидаемые голы: **{h_def['name']} (λ₁ = {l1})** — **{a_def['name']} (λ₂ = {l2})**")
 
     st.subheader("1. Ключевые факторы матча")
-    corsi_txt = f"\n\n**• Corsi (по 10 играм):** {h_name} {h_adv['corsi_pct']}% ({h_adv['avg_sog']} бр) vs {a_name} {a_adv['corsi_pct']}% ({a_adv['avg_sog']} бр)" if h_adv and a_adv else ""
-    st.info(f"**• Тренды xG и моменты:** {h_name} ({h_xg} xG, {h_hdcf}% HDCF) vs {a_name} ({a_xg} xG, {a_hdcf}% HDCF)\n\n**• Вратари GSAx/60:** {h_gsax:+.2f} vs {a_gsax:+.2f}{corsi_txt}")
+    st.info(
+        f"**• Тренды xG и моменты:** {h_def['name']} ({h_def['xg_per60']} xG, {h_def['hdcf_pct']}% HDCF) vs "
+        f"{a_def['name']} ({a_def['xg_per60']} xG, {a_def['hdcf_pct']}% HDCF).\n\n"
+        f"**• Владение (Corsi / Fenwick по 10 протоколам):** {h_def['name']} ({h_adv['corsi_pct']}% CF / {h_adv['fenwick_pct']}% FF) vs "
+        f"{a_def['name']} ({a_adv['corsi_pct']}% CF / {a_adv['fenwick_pct']}% FF).\n\n"
+        f"**• Вратари GSAx/60:** {h_def['goalie_gsax_per60']:+.2f} vs {a_def['goalie_gsax_per60']:+.2f}."
+    )
 
     if h_adv and h_adv["roster"]:
-        with st.expander("📋 Прогнозируемые составы (10 последних протоколов)"):
-            st.write(f"**{h_name}:** " + ", ".join(h_adv["roster"]))
-            st.write(f"**{a_name}:** " + ", ".join(a_adv["roster"]))
+        with st.expander("📋 Прогнозируемые составы (на основе 10 последних протоколов)"):
+            st.write(f"**{h_def['name']}:** " + ", ".join(h_adv["roster"]))
+            st.write(f"**{a_def['name']}:** " + ", ".join(a_adv["roster"]))
 
     st.subheader("2. Сводная таблица вероятностей (%)")
     st.dataframe(pd.DataFrame([{"Маркет": k, "Вероятность (%)": v} for k, v in res["markets"].items()]), use_container_width=True, hide_index=True)
@@ -80,4 +103,8 @@ if st.button("🚀 Рассчитать матч (Ансамбль 500 000 си�
 
     st.subheader("4. Объективный статистический вывод")
     m = res["markets"]
-    st.write(f"Ожидаемый тотал: **{l1 + l2:.2f} шайб**. П1: **{m['П1 (Победа хозяев)']}%**, 1Х: **{m['1Х']}%**, П2: **{m['П2 (Победа гостей)']}%**, ТБ 5.5: **{m['ТБ 5.5']}%**.")
+    st.write(
+        f"По итогам 500 000 симуляций ожидаемый тотал матча составляет **{l1 + l2:.2f} шайб**. "
+        f"Вероятность победы **{h_def['name']}** — **{m['П1 (Победа хозяев)']}%** (1Х — **{m['1Х']}%**), "
+        f"победы **{a_def['name']}** — **{m['П2 (Победа гостей)']}%** (2Х — **{m['2Х']}%**), ТБ 5.5 — **{m['ТБ 5.5']}%**."
+    )
