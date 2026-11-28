@@ -1,132 +1,114 @@
-import numpy as np
-import requests
-from datetime import datetime, timedelta
-from collections import Counter
+import streamlit as st
+import pandas as pd
+from engine import get_league_data, fetch_last_10_protocols, HockeyMatchSimulator
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+st.set_page_config(page_title="Hockey AI & Monte Carlo", page_icon="🏒", layout="centered")
 
-LEAGUES_META = {
-    "NHL": {"sport_db": "4380", "avg_g": 3.05},
-    "KHL": {"sport_db": "4420", "avg_g": 2.65},
-    "Liiga": {"sport_db": "4424", "avg_g": 2.75},
-    "Extraliga": {"sport_db": "4422", "avg_g": 2.80},
-    "DEL": {"sport_db": "4423", "avg_g": 2.95},
-    "SHL": {"sport_db": "4421", "avg_g": 2.70},
-    "NL": {"sport_db": "4425", "avg_g": 2.85},
-    "EHL": {"sport_db": "4432", "avg_g": 3.10},
+@st.cache_data(ttl=1800)
+def cached_league(code: str):
+    return get_league_data(code)
+
+@st.cache_data(ttl=1800)
+def cached_protocols(code: str, key: str, stat: dict):
+    return fetch_last_10_protocols(code, key, stat)
+
+st.title("🏒 Хоккейный Анализатор (500K)")
+
+LEAGUE_MAP = {
+    "NHL (НХЛ)": "NHL",
+    "KHL (КХЛ)": "KHL",
+    "Liiga (Финляндия)": "Liiga",
+    "Extraliga (Чехия)": "Extraliga",
+    "DEL (Германия)": "DEL",
+    "SHL (Швеция)": "SHL",
+    "NL (Швейцария)": "NL",
+    "EHL (Норвегия)": "EHL"
 }
 
-def get_league_data(league_code: str):
-    """Автоматически загружает ближайшие матчи и статистику команд выбранной лиги"""
-    if league_code == "NHL":
-        return _fetch_nhl_full()
-    return _fetch_euro_league(league_code)
+selected_league_label = st.selectbox("Выберите лигу:", list(LEAGUE_MAP.keys()))
+league_code = LEAGUE_MAP[selected_league_label]
 
-def _fetch_nhl_full():
-    matches = []
-    team_stats = {}
+with st.spinner(f"Автозагрузка матчей и статистики {selected_league_label}..."):
+    matches, team_stats = cached_league(league_code)
 
-    try:
-        r = requests.get("https://nhle.com", headers=HEADERS, timeout=10)
-        if r.status_code == 200:
-            for row in r.json().get("standings", []):
-                ab = row.get("teamAbbrev", {}).get("default", "")
-                gp = max(1, row.get("gamesPlayed", 1))
-                gf = row.get("goalFor", 0)
-                ga = row.get("goalAgainst", 0)
-                xg60 = round((gf / gp) * 0.96, 2)
-                xga60 = round((ga / gp) * 0.96, 2)
-                hdcf = round(50.0 + (xg60 - xga60) * 6.5, 1)
-                team_stats[ab] = {
-                    "name": row.get("teamName", {}).get("default", ab),
-                    "xg_per60": xg60,
-                    "xga_per60": xga60,
-                    "hdcf_pct": min(65.0, max(35.0, hdcf)),
-                    "pp_pct": round(21.5 + (xg60 - 2.9) * 5, 1),
-                    "pk_pct": round(80.0 - (xga60 - 2.9) * 5, 1),
-                    "goalie_gsax_per60": round((2.95 - (ga / gp)) * 0.35, 2)
-                }
-    except Exception:
-        pass
+h_key, a_key = None, None
+h_def = {"name": "Хозяева", "xg_per60": 3.00, "xga_per60": 2.65, "hdcf_pct": 51.5, "pp_pct": 21.5, "pk_pct": 80.5, "goalie_gsax_per60": 0.08}
+a_def = {"name": "Гости", "xg_per60": 2.80, "xga_per60": 2.80, "hdcf_pct": 49.0, "pp_pct": 19.5, "pk_pct": 79.0, "goalie_gsax_per60": 0.00}
 
-    try:
-        sch = requests.get("https://nhle.com", headers=HEADERS, timeout=10)
-        if sch.status_code == 200:
-            for day in sch.json().get("gameWeek", []):
-                date_str = day.get("date", "")
-                for g in day.get("games", []):
-                    if g.get("gameState") in ("FUT", "PRE", "LIVE", "CRIT"):
-                        h_ab = g.get("homeTeam", {}).get("abbrev", "")
-                        a_ab = g.get("awayTeam", {}).get("abbrev", "")
-                        start_utc = g.get("startTimeUTC", "")
-                        matches.append({
-                            "label": f"{date_str} | {h_ab} — {a_ab} ({start_utc[11:16]} UTC)",
-                            "home": h_ab,
-                            "away": a_ab
-                        })
-    except Exception:
-        pass
+if matches:
+    sel_match = st.selectbox("📅 Предстоящие матчи (автозагрузка):", [m["label"] for m in matches])
+    m_obj = next(m for m in matches if m["label"] == sel_match)
+    h_key, a_key = m_obj["home"], m_obj["away"]
+    h_def = team_stats.get(h_key, h_def)
+    a_def = team_stats.get(a_key, a_def)
+elif team_stats:
+    st.info("Ближайших матчей в расписании нет — выберите любые две команды лиги из списка:")
+    teams_list = sorted(list(team_stats.keys()))
+    c_sel1, c_sel2 = st.columns(2)
+    with c_sel1:
+        h_key = st.selectbox("Команда хозяев:", teams_list, index=0)
+    with c_sel2:
+        a_key = st.selectbox("Команда гостей:", teams_list, index=min(1, len(teams_list) - 1))
+    h_def = team_stats[h_key]
+    a_def = team_stats[a_key]
+else:
+    st.warning("Сервер лиги временно недоступен — показаны базовые коэффициенты.")
 
-    return matches, team_stats
+h_adv = cached_protocols(league_code, h_key or h_def["name"], h_def)
+a_adv = cached_protocols(league_code, a_key or a_def["name"], a_def)
 
-def _fetch_euro_league(league_code: str):
-    """Загружает расписание ближайших матчей и сезонную статистику клубов для КХЛ и лиг Европы"""
-    meta = LEAGUES_META.get(league_code, {"sport_db": "4420", "avg_g": 2.75})
-    lid = meta["sport_db"]
-    avg_g = meta["avg_g"]
-    matches = []
-    team_stats = {}
+st.markdown(f"### 🆚 {h_def['name']} — {a_def['name']}")
 
-    try:
-        t_url = f"https://thesportsdb.com{lid}&s=2026-2027"
-        tr = requests.get(t_url, headers=HEADERS, timeout=10)
-        if tr.status_code == 200 and tr.json().get("table"):
-            for row in tr.json()["table"]:
-                t_name = row.get("strTeam", "")
-                gp = max(1, int(row.get("intPlayed", 1)))
-                gf = int(row.get("intGoalsFor", int(gp * avg_g)))
-                ga = int(row.get("intGoalsAgainst", int(gp * avg_g)))
-                xg60 = round((gf / gp) * 0.95, 2)
-                xga60 = round((ga / gp) * 0.95, 2)
-                hdcf = round(50.0 + (xg60 - xga60) * 6.0, 1)
-                team_stats[t_name] = {
-                    "name": t_name,
-                    "xg_per60": xg60,
-                    "xga_per60": xga60,
-                    "hdcf_pct": min(64.0, max(36.0, hdcf)),
-                    "pp_pct": round(20.0 + (xg60 - avg_g) * 4.5, 1),
-                    "pk_pct": round(81.0 - (xga60 - avg_g) * 4.5, 1),
-                    "goalie_gsax_per60": round((avg_g - (ga / gp)) * 0.32, 2)
-                }
-    except Exception:
-        pass
+with st.expander("📊 Автозагруженные метрики команд (xG, HDCF, спецбригады, вратари)"):
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(f"**{h_def['name']}**")
+        st.write(f"• xG/60: **{h_def['xg_per60']}** | xGA/60: **{h_def['xga_per60']}**")
+        st.write(f"• Corsi: **{h_adv['corsi_pct']}%** | Fenwick: **{h_adv['fenwick_pct']}%**")
+        st.write(f"• HDCF%: **{h_def['hdcf_pct']}%** | PP/PK: **{h_def['pp_pct']}% / {h_def['pk_pct']}%**")
+        st.write(f"• Вратарь GSAx/60: **{h_def['goalie_gsax_per60']:+.2f}**")
+    with c2:
+        st.markdown(f"**{a_def['name']}**")
+        st.write(f"• xG/60: **{a_def['xg_per60']}** | xGA/60: **{a_def['xga_per60']}**")
+        st.write(f"• Corsi: **{a_adv['corsi_pct']}%** | Fenwick: **{a_adv['fenwick_pct']}%**")
+        st.write(f"• HDCF%: **{a_def['hdcf_pct']}%** | PP/PK: **{a_def['pp_pct']}% / {a_def['pk_pct']}%**")
+        st.write(f"• Вратарь GSAx/60: **{a_def['goalie_gsax_per60']:+.2f}**")
 
-    try:
-        n_url = f"https://thesportsdb.com{lid}"
-        nr = requests.get(n_url, headers=HEADERS, timeout=10)
-        if nr.status_code == 200 and nr.json().get("events"):
-            for ev in nr.json()["events"][:15]:
-                h_name = ev.get("strHomeTeam", "")
-                a_name = ev.get("strAwayTeam", "")
-                d_ev = ev.get("dateEvent", "")
-                t_ev = (ev.get("strTime") or "18:00")[:5]
-                if h_name and a_name:
-                    matches.append({
-                        "label": f"{d_ev} | {h_name} — {a_name} ({t_ev})",
-                        "home": h_name,
-                        "away": a_name
-                    })
-                    for tm in (h_name, a_name):
-                        if tm not in team_stats:
-                            team_stats[tm] = {
-                                "name": tm, "xg_per60": avg_g, "xga_per60": avg_g,
-                                "hdcf_pct": 50.0, "pp_pct": 20.0, "pk_pct": 80.0, "goalie_gsax_per60": 0.0
-                            }
-    except Exception:
-        pass
+if st.button("🚀 Рассчитать матч (Ансамбль 500 000 симуляций)", use_container_width=True):
+    sim = HockeyMatchSimulator(n_sims=500_000)
+    res = sim.run_ensemble(h_def, a_def)
+    l1, l2 = res["lambdas"]
 
-    return matches, team_stats
-def fetch_last_10_protocols(league_code: str, team_key: str, team_stat: dict):
+    st.success(f"Ожидаемые голы: **{h_def['name']} (λ₁ = {l1})** — **{a_def['name']} (λ₂ = {l2})**")
+
+    st.subheader("1. Ключевые факторы матча")
+    st.info(
+        f"**• Тренды xG и моменты:** {h_def['name']} ({h_def['xg_per60']} xG, {h_def['hdcf_pct']}% HDCF) vs "
+        f"{a_def['name']} ({a_def['xg_per60']} xG, {a_def['hdcf_pct']}% HDCF).\n\n"
+        f"**• Владение (Corsi / Fenwick по 10 протоколам):** {h_def['name']} ({h_adv['corsi_pct']}% CF / {h_adv['fenwick_pct']}% FF) vs "
+        f"{a_def['name']} ({a_adv['corsi_pct']}% CF / {a_adv['fenwick_pct']}% FF).\n\n"
+        f"**• Вратари GSAx/60:** {h_def['goalie_gsax_per60']:+.2f} vs {a_def['goalie_gsax_per60']:+.2f}."
+    )
+
+    if h_adv and h_adv["roster"]:
+        with st.expander("📋 Прогнозируемые составы (на основе 10 последних протоколов)"):
+            st.write(f"**{h_def['name']}:** " + ", ".join(h_adv["roster"]))
+            st.write(f"**{a_def['name']}:** " + ", ".join(a_adv["roster"]))
+
+    st.subheader("2. Сводная таблица вероятностей (%)")
+    st.dataframe(pd.DataFrame([{"Маркет": k, "Вероятность (%)": v} for k, v in res["markets"].items()]), use_container_width=True, hide_index=True)
+
+    st.subheader("3. Топ-5 точных счетов (основное время)")
+    st.dataframe(pd.DataFrame(res["top_5_scores"]), use_container_width=True, hide_index=True)
+
+    st.subheader("4. Объективный статистический вывод")
+    m = res["markets"]
+    st.write(
+        f"По итогам 500 000 симуляций ожидаемый тотал матча составляет **{l1 + l2:.2f} шайб**. "
+        f"Вероятность победы **{h_def['name']}** — **{m['П1 (Победа хозяев)']}%** (1Х — **{m['1Х']}%**), "
+        f"победы **{a_def['name']}** — **{m['П2 (Победа гостей)']}%** (2Х — **{m['2Х']}%**), ТБ 5.5 — **{m['ТБ 5.5']}%**."
+    )
+    def fetch_last_10_protocols(league_code: str, team_key: str, team_stat: dict):
     """Анализирует последние >=10 протоколов: Corsi, Fenwick, броски и прогноз состава"""
     if league_code == "NHL":
         player_counter = Counter()
