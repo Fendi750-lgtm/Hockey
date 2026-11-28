@@ -6,17 +6,38 @@ class HockeyMatchSimulator:
         self.n_sims = n_sims
         self.rng = np.random.default_rng()
 
-    def calculate_lambdas(self, h: dict, a: dict):
+    def calculate_lambdas(self, h: dict, a: dict, adj: dict):
         h_off = h['xg_per60'] * (0.7 + 0.3 * (h['hdcf_pct'] / 50.0))
         a_off = a['xg_per60'] * (0.7 + 0.3 * (a['hdcf_pct'] / 50.0))
         h_pp = (h['pp_pct'] / 100.0) * (1.0 - a['pk_pct'] / 100.0) * 3.5
         a_pp = (a['pp_pct'] / 100.0) * (1.0 - h['pk_pct'] / 100.0) * 3.5
-        l1 = max(0.5, (h_off * (a['xga_per60'] / 2.80) * 1.08) + h_pp - a['goalie_gsax_per60'])
-        l2 = max(0.5, (a_off * (h['xga_per60'] / 2.80)) + a_pp - h['goalie_gsax_per60'])
-        return round(l1, 3), round(l2, 3)
 
-    def run_ensemble(self, h: dict, a: dict) -> dict:
-        l1, l2 = self.calculate_lambdas(h, a)
+        l1 = (h_off * (a['xga_per60'] / 2.80) * 1.08) + h_pp - a['goalie_gsax_per60']
+        l2 = (a_off * (h['xga_per60'] / 2.80)) + a_pp - h['goalie_gsax_per60']
+
+        # 1. Поправка на бэк-ту-бэк (второй матч за 2 дня снижает атаку на ~6% и проседает защита на ~5%)
+        if adj.get("h_b2b"):
+            l1 *= 0.94
+            l2 *= 1.05
+        if adj.get("a_b2b"):
+            l2 *= 0.94
+            l1 *= 1.05
+
+        # 2. Поправка на травмы ключевых игроков (-4.5% к атаке за каждого лидера)
+        l1 *= max(0.75, 1.0 - 0.045 * adj.get("h_injuries", 0))
+        l2 *= max(0.75, 1.0 - 0.045 * adj.get("a_injuries", 0))
+
+        # 3. Поправка на замену основного вратаря на запасного (+0.28 ожидаемых шайб сопернику)
+        if adj.get("h_backup_goalie"):
+            l2 += 0.28
+        if adj.get("a_backup_goalie"):
+            l1 += 0.28
+
+        return round(max(0.5, l1), 3), round(max(0.5, l2), 3)
+
+    def run_ensemble(self, h: dict, a: dict, adj: dict = None) -> dict:
+        adj = adj or {}
+        l1, l2 = self.calculate_lambdas(h, a, adj)
         n = self.n_sims // 4
 
         x3 = self.rng.poisson(0.12, n)
@@ -51,7 +72,7 @@ class HockeyMatchSimulator:
 
         top_5 = [{"Счёт": f"{s} : {s}", "Вероятность (%)": round((c / len(g1)) * 100, 2)} for s, c in Counter(zip(g1.tolist(), g2.tolist())).most_common(5)]
         markets = {
-            "П1 (Победа хозяев)": pct(g1 > g2), "Х (Ничья)": pct(g1 == g2), "П2 (Победа гостей)": pct(g1 < g2),
+            "П1": pct(g1 > g2), "Х": pct(g1 == g2), "П2": pct(g1 < g2),
             "1Х": pct(g1 >= g2), "2Х": pct(g1 <= g2),
             "ТБ 4.5": pct(tot > 4.5), "ТМ 4.5": pct(tot < 4.5),
             "ТБ 5.5": pct(tot > 5.5), "ТМ 5.5": pct(tot < 5.5),
