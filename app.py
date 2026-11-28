@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-from engine import get_league_data, fetch_last_10_protocols, HockeyMatchSimulator
+from leagues_api import get_league_data, fetch_last_10_protocols
+from sim_core import HockeyMatchSimulator
 
 st.set_page_config(page_title="Hockey AI & Monte Carlo", page_icon="🏒", layout="centered")
 
@@ -15,83 +16,67 @@ def cached_protocols(code: str, key: str, stat: dict):
 st.title("🏒 Хоккейный Анализатор (500K)")
 
 LEAGUE_MAP = {
-    "NHL (НХЛ)": "NHL",
-    "KHL (КХЛ)": "KHL",
-    "Liiga (Финляндия)": "Liiga",
-    "Extraliga (Чехия)": "Extraliga",
-    "DEL (Германия)": "DEL",
-    "SHL (Швеция)": "SHL",
-    "NL (Швейцария)": "NL",
-    "EHL (Норвегия)": "EHL"
+    "NHL (НХЛ)": "NHL", "KHL (КХЛ)": "KHL", "Liiga (Финляндия)": "Liiga",
+    "Extraliga (Чехия)": "Extraliga", "DEL (Германия)": "DEL",
+    "SHL (Швеция)": "SHL", "NL (Швейцария)": "NL", "EHL (Норвегия)": "EHL"
 }
 
-selected_league_label = st.selectbox("Выберите лигу:", list(LEAGUE_MAP.keys()))
-league_code = LEAGUE_MAP[selected_league_label]
+sel_label = st.selectbox("Выберите лигу:", list(LEAGUE_MAP.keys()))
+code = LEAGUE_MAP[sel_label]
 
-with st.spinner(f"Автозагрузка матчей и статистики {selected_league_label}..."):
-    matches, team_stats = cached_league(league_code)
+with st.spinner(f"Автозагрузка матчей {sel_label}..."):
+    matches, team_stats = cached_league(code)
 
 h_key, a_key = None, None
 h_def = {"name": "Хозяева", "xg_per60": 3.00, "xga_per60": 2.65, "hdcf_pct": 51.5, "pp_pct": 21.5, "pk_pct": 80.5, "goalie_gsax_per60": 0.08}
 a_def = {"name": "Гости", "xg_per60": 2.80, "xga_per60": 2.80, "hdcf_pct": 49.0, "pp_pct": 19.5, "pk_pct": 79.0, "goalie_gsax_per60": 0.00}
 
 if matches:
-    sel_match = st.selectbox("📅 Предстоящие матчи (автозагрузка):", [m["label"] for m in matches])
-    m_obj = next(m for m in matches if m["label"] == sel_match)
+    sel_m = st.selectbox("📅 Предстоящие матчи (автозагрузка):", [m["label"] for m in matches])
+    m_obj = next(m for m in matches if m["label"] == sel_m)
     h_key, a_key = m_obj["home"], m_obj["away"]
-    h_def = team_stats.get(h_key, h_def)
-    a_def = team_stats.get(a_key, a_def)
+    h_def, a_def = team_stats.get(h_key, h_def), team_stats.get(a_key, a_def)
 elif team_stats:
-    st.info("Ближайших матчей в расписании нет — выберите любые две команды лиги из списка:")
-    teams_list = sorted(list(team_stats.keys()))
-    c_sel1, c_sel2 = st.columns(2)
-    with c_sel1:
-        h_key = st.selectbox("Команда хозяев:", teams_list, index=0)
-    with c_sel2:
-        a_key = st.selectbox("Команда гостей:", teams_list, index=min(1, len(teams_list) - 1))
-    h_def = team_stats[h_key]
-    a_def = team_stats[a_key]
-else:
-    st.warning("Сервер лиги временно недоступен — показаны базовые коэффициенты.")
+    teams = sorted(list(team_stats.keys()))
+    c1, c2 = st.columns(2)
+    h_key = c1.selectbox("Команда хозяев:", teams, index=0)
+    a_key = c2.selectbox("Команда гостей:", teams, index=min(1, len(teams) - 1))
+    h_def, a_def = team_stats[h_key], team_stats[a_key]
 
-h_adv = cached_protocols(league_code, h_key or h_def["name"], h_def)
-a_adv = cached_protocols(league_code, a_key or a_def["name"], a_def)
+h_adv = cached_protocols(code, h_key or h_def["name"], h_def)
+a_adv = cached_protocols(code, a_key or a_def["name"], a_def)
 
 st.markdown(f"### 🆚 {h_def['name']} — {a_def['name']}")
 
-with st.expander("📊 Автозагруженные метрики команд (xG, HDCF, спецбригады, вратари)"):
+with st.expander("📊 Автозагруженные метрики команд"):
     c1, c2 = st.columns(2)
     with c1:
         st.markdown(f"**{h_def['name']}**")
         st.write(f"• xG/60: **{h_def['xg_per60']}** | xGA/60: **{h_def['xga_per60']}**")
         st.write(f"• Corsi: **{h_adv['corsi_pct']}%** | Fenwick: **{h_adv['fenwick_pct']}%**")
-        st.write(f"• HDCF%: **{h_def['hdcf_pct']}%** | PP/PK: **{h_def['pp_pct']}% / {h_def['pk_pct']}%**")
+        st.write(f"• HDCF%: **{h_def['hdcf_pct']}%** | PP/PK: **{h_def['pp_pct']}%/{h_def['pk_pct']}%**")
         st.write(f"• Вратарь GSAx/60: **{h_def['goalie_gsax_per60']:+.2f}**")
     with c2:
         st.markdown(f"**{a_def['name']}**")
         st.write(f"• xG/60: **{a_def['xg_per60']}** | xGA/60: **{a_def['xga_per60']}**")
         st.write(f"• Corsi: **{a_adv['corsi_pct']}%** | Fenwick: **{a_adv['fenwick_pct']}%**")
-        st.write(f"• HDCF%: **{a_def['hdcf_pct']}%** | PP/PK: **{a_def['pp_pct']}% / {a_def['pk_pct']}%**")
+        st.write(f"• HDCF%: **{a_def['hdcf_pct']}%** | PP/PK: **{a_def['pp_pct']}%/{a_def['pk_pct']}%**")
         st.write(f"• Вратарь GSAx/60: **{a_def['goalie_gsax_per60']:+.2f}**")
 
 if st.button("🚀 Рассчитать матч (Ансамбль 500 000 симуляций)", use_container_width=True):
-    sim = HockeyMatchSimulator(n_sims=500_000)
-    res = sim.run_ensemble(h_def, a_def)
+    res = HockeyMatchSimulator(n_sims=500_000).run_ensemble(h_def, a_def)
     l1, l2 = res["lambdas"]
-
     st.success(f"Ожидаемые голы: **{h_def['name']} (λ₁ = {l1})** — **{a_def['name']} (λ₂ = {l2})**")
 
     st.subheader("1. Ключевые факторы матча")
     st.info(
-        f"**• Тренды xG и моменты:** {h_def['name']} ({h_def['xg_per60']} xG, {h_def['hdcf_pct']}% HDCF) vs "
-        f"{a_def['name']} ({a_def['xg_per60']} xG, {a_def['hdcf_pct']}% HDCF).\n\n"
-        f"**• Владение (Corsi / Fenwick по 10 протоколам):** {h_def['name']} ({h_adv['corsi_pct']}% CF / {h_adv['fenwick_pct']}% FF) vs "
-        f"{a_def['name']} ({a_adv['corsi_pct']}% CF / {a_adv['fenwick_pct']}% FF).\n\n"
-        f"**• Вратари GSAx/60:** {h_def['goalie_gsax_per60']:+.2f} vs {a_def['goalie_gsax_per60']:+.2f}."
+        f"**• xG и моменты:** {h_def['name']} ({h_def['xg_per60']} xG, {h_def['hdcf_pct']}% HDCF) vs {a_def['name']} ({a_def['xg_per60']} xG, {a_def['hdcf_pct']}% HDCF)\n\n"
+        f"**• Владение (10 протоколов):** {h_adv['corsi_pct']}% CF / {h_adv['fenwick_pct']}% FF vs {a_adv['corsi_pct']}% CF / {a_adv['fenwick_pct']}% FF\n\n"
+        f"**• Вратари GSAx/60:** {h_def['goalie_gsax_per60']:+.2f} vs {a_def['goalie_gsax_per60']:+.2f}"
     )
 
     if h_adv and h_adv["roster"]:
-        with st.expander("📋 Прогнозируемые составы (на основе 10 последних протоколов)"):
+        with st.expander("📋 Прогнозируемые составы (по 10 последним протоколам)"):
             st.write(f"**{h_def['name']}:** " + ", ".join(h_adv["roster"]))
             st.write(f"**{a_def['name']}:** " + ", ".join(a_adv["roster"]))
 
@@ -103,8 +88,4 @@ if st.button("🚀 Рассчитать матч (Ансамбль 500 000 си�
 
     st.subheader("4. Объективный статистический вывод")
     m = res["markets"]
-    st.write(
-        f"По итогам 500 000 симуляций ожидаемый тотал матча составляет **{l1 + l2:.2f} шайб**. "
-        f"Вероятность победы **{h_def['name']}** — **{m['П1 (Победа хозяев)']}%** (1Х — **{m['1Х']}%**), "
-        f"победы **{a_def['name']}** — **{m['П2 (Победа гостей)']}%** (2Х — **{m['2Х']}%**), ТБ 5.5 — **{m['ТБ 5.5']}%**."
-    )
+    st.write(f"Ожидаемый тотал: **{l1 + l2:.2f} шайб**. П1: **{m['П1 (Победа хозяев)']}%** (1Х — **{m['1Х']}%**), П2: **{m['П2 (Победа гостей)']}%** (2Х — **{m['2Х']}%**), ТБ 5.5: **{m['ТБ 5.5']}%**.")
